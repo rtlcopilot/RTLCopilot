@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+*.egg-info/
+
+# Environment variables - NEVER commit these
+.env
+.env.local
+.env.production
+
+# Node
+node_modules/
+build/
+dist/
+.vite/
+
+# Generated Verilog/simulation files
+backend/rtl_codegen/temp_*.json
+backend/rtl_codegen/*.v
+backend/rtl_codegen/*.vcd
+backend/rtl_codegen/*.vvp
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test/temp IR files
+backend/rtl_codegen/*.json
+
+# PD run outputs - never commit these
+pd_work/
+pdtools/work/
+
+# PD temporary files
+*.gds
+*.def
+*.lef
+*.odb
+*.rpt
+*.spef

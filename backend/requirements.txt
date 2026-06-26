@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+slowapi
+supabase
+python-dotenv
+openai
+httpx
+razorpay

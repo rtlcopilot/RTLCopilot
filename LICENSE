@@ -1,0 +1,36 @@
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+RTLCopilot — AI-assisted RTL design tool
+Copyright (C) 2024 Suchit (RTLCopilot)
+Contact: rtlcopilot@gmail.com
+Live version: https://rtlcopilot.com
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+ADDITIONAL TERMS (permitted under section 7 of AGPL-3.0):
+
+1. Attribution required. All copies, forks, and derivative works must
+   prominently display the following notice:
+   "Based on RTLCopilot by Suchit (https://rtlcopilot.com)"
+
+2. The name "RTLCopilot" and the rtlcopilot.com domain may not be used
+   to endorse or promote derivative products without prior written
+   permission from the original author.
+
+---
+
+Full license text: https://www.gnu.org/licenses/agpl-3.0.txt

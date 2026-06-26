@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  pd-tools:
+    image: rtlcopilot/pd-tools:latest
+    build: .
+    ports:
+      - "7070:7070"
+    volumes:
+      - ./work:/work        # mount local ./work folder into container
+    restart: unless-stopped
