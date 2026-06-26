@@ -2,9 +2,8 @@
 
 **AI-assisted RTL design tool. Draw circuits visually, describe them in plain English, simulate, and take your design all the way to GDS — on your desktop.**
 
-> RTLCopilot was created by [Suchit Tilak](https://github.com/rtlcopilot).
+> RTLCopilot was created by [Suchit Tilak](https://github.com/Suchit18).
 
-![RTLCopilot Canvas](docs/screenshot.png)
 
 ---
 
@@ -22,7 +21,7 @@ RTL Brain (the AI generation pipeline) is experimental. It works well for common
 
 ---
 
-## Live version
+## Information Page
 
 [rtlcopilot.com](https://rtlcopilot.com)
 
@@ -193,4 +192,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 AGPL-3.0 — see [LICENSE](LICENSE).
 
-RTLCopilot was created by Suchit Tilak. Copyright (c) 2025 RTLCopilot Contributors.
+RTLCopilot was created by Suchit Tilak. Copyright (c) 2026 RTLCopilot Contributors.
