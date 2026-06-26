@@ -183,7 +183,7 @@ _LLM_API_KEY  = os.environ.get("LLM_API_KEY",  "")
 _LLM_MODEL    = os.environ.get("LLM_MODEL",    _DEFAULT_MODELS.get(_LLM_PROVIDER, "gpt-4o-mini"))
 _LLM_BASE_URL = _PROVIDER_URLS.get(_LLM_PROVIDER, _PROVIDER_URLS["openai"])
 
-_llm_client = OpenAI(base_url=_LLM_BASE_URL, api_key=_LLM_API_KEY)
+_llm_client = OpenAI(base_url=_LLM_BASE_URL, api_key=_LLM_API_KEY) if _LLM_API_KEY else None
 
 def _get_llm_client(user_api_key=None, user_provider=None, user_model=None):
     """Return (client, model) for BYOK or server defaults."""
@@ -196,6 +196,8 @@ def _get_llm_client(user_api_key=None, user_provider=None, user_model=None):
         base_url = _PROVIDER_URLS[provider]
         model    = (user_model or _DEFAULT_MODELS.get(provider, _LLM_MODEL)).strip()
         return OpenAI(base_url=base_url, api_key=key), model
+    if _llm_client is None:
+        raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings (click the key icon in the toolbar)."})
     return _llm_client, _LLM_MODEL
 
 def _extract_user_api_key(request):
@@ -2753,7 +2755,10 @@ def _llm_understand_circuit(ir: dict, llm=None, model=None) -> dict:
     LLM Call 1 -- reads IR, understands the circuit, suggests test cases.
     Returns structured understanding dict.
     """
-    if llm is None: llm = _llm_client
+    if llm is None:
+        if _llm_client is None:
+            raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+        llm = _llm_client
     if model is None: model = _LLM_MODEL
     ir_summary = _build_ir_summary(ir)
     ports      = ir.get("ports", [])
@@ -3568,7 +3573,10 @@ async def _run_hierarchical(prompt: str, width_hint: str, current_user: str, llm
 
     try:
         print("\n[PHASE 1] Decomposing into sub-circuits...", flush=True)
-        if llm is None: llm = _llm_client
+        if llm is None:
+            if _llm_client is None:
+                raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+            llm = _llm_client
         if model is None: model = _LLM_MODEL
         decomp_resp = llm.chat.completions.create(
             model=model,
@@ -4084,7 +4092,10 @@ async def _rtl_brain_stage0(prompt: str, width_hint: str, llm=None, model=None) 
     Returns (None, clarification_str) when LLM needs more info.
     Returns (None, None) on hard failure.
     """
-    if llm is None: llm = _llm_client
+    if llm is None:
+        if _llm_client is None:
+            raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+        llm = _llm_client
     if model is None: model = _LLM_MODEL
     vocab    = _build_stage0_vocabulary()
     user_msg = (
@@ -4269,7 +4280,10 @@ async def _rtl_brain_stage1(
         "Output the JSON now:"
     )
     try:
-        if llm is None: llm = _llm_client
+        if llm is None:
+            if _llm_client is None:
+                raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+            llm = _llm_client
         if model is None: model = _LLM_MODEL
         resp = llm.chat.completions.create(
             model=model,
@@ -4881,7 +4895,10 @@ async def _rtl_brain_stage2(hierarchy: dict, llm=None, model=None) -> dict:
         'If nothing needs transformation, return {"signal_list":[],"output_logic":[]}.\n'
         "Output the JSON now:"
     )
-    if llm is None: llm = _llm_client
+    if llm is None:
+        if _llm_client is None:
+            raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+        llm = _llm_client
     if model is None: model = _LLM_MODEL
     try:
         resp = llm.chat.completions.create(
@@ -5105,7 +5122,10 @@ async def _rtl_brain_stage3_fsm(sc_id: str, sc: dict,
         "Output the JSON now:"
     )
     try:
-        if llm is None: llm = _llm_client
+        if llm is None:
+            if _llm_client is None:
+                raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+            llm = _llm_client
         if model is None: model = _LLM_MODEL
         resp = llm.chat.completions.create(
             model=model,
@@ -5190,7 +5210,10 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
     print(f"{'='*60}", flush=True)
 
     print("\n[RTL_BRAIN] Stage 0 — Generic decomposition...", flush=True)
-    if llm is None: llm = _llm_client
+    if llm is None:
+        if _llm_client is None:
+            raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
+        llm = _llm_client
     if model is None: model = _LLM_MODEL
     raw_concepts, clarification = await _rtl_brain_stage0(prompt, width_hint, llm=llm, model=model)
 
