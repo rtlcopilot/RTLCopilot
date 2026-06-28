@@ -19,6 +19,22 @@ RTLCopilot is an open source hardware design tool that lets you:
 
 RTL Brain (the AI generation pipeline) is experimental. It works well for common circuit patterns and is actively being improved. Community contributions to RTL Brain are especially welcome.
 
+
+## Screenshots
+
+![Canvas Designer](docs/canvas.png)
+*AI-generated serial data recorder — FIFO, FSM, counter, threshold detector all wired automatically*
+
+![AI Design Copilot](docs/ai_thinking.png)
+*Describe a circuit in plain English — RTL Brain decomposes and builds it on the canvas*
+
+![Generated Verilog](docs/verilog_code.png)
+*Clean, hierarchical Verilog output — multiple sub-modules generated alongside top.v*
+
+![Physical Design](docs/pd_flow.png)
+*Full RTL to GDS flow — Synthesis, Floorplan, Placement, CTS, Routing, DRC all in one tool*
+
+---
 ---
 
 ## Information Page
