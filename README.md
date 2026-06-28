@@ -85,7 +85,7 @@ rtlcopilot/
 
 - Python 3.10+
 - Node.js 18+
-- [iverilog](http://iverilog.icarus.com/) installed and on PATH
+- [iverilog](https://steveicarus.github.io/iverilog/) v12.0+ installed and on PATH — Windows: [download installer](https://bleyer.org/icarus/)
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for PD flow)
 - A free [Supabase](https://supabase.com) project
 - An API key from OpenAI, Groq, or NVIDIA NIM (BYOK)
