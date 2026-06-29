@@ -38,7 +38,9 @@ from slowapi.errors import RateLimitExceeded
 
 load_dotenv(Path(__file__).parent / ".env")
 
-_enable_docs = os.environ.get("ENABLE_DOCS", "false").lower() == "true"
+_enable_docs   = os.environ.get("ENABLE_DOCS",    "false").lower() == "true"
+_OFFLINE_MODE  = os.environ.get("OFFLINE_MODE",   "false").lower() == "true"
+_LOCAL_DB_PATH = Path(__file__).parent / "local_db.json"
 app = FastAPI(
     docs_url="/docs" if _enable_docs else None,
     redoc_url="/redoc" if _enable_docs else None,
@@ -416,7 +418,21 @@ def _supabase():
         raise RuntimeError("supabase-py not installed.")
 
 
+
+
+def _local_db_read() -> dict:
+    if _LOCAL_DB_PATH.exists():
+        with open(_LOCAL_DB_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"projects": {}, "custom_blocks": {}}
+
+
+def _local_db_write(db: dict):
+    with open(_LOCAL_DB_PATH, "w", encoding="utf-8") as f:
+        json.dump(db, f, indent=2)
 async def _get_current_user(request: Request) -> str:
+    if _OFFLINE_MODE:
+        return "local_user"
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -844,6 +860,11 @@ async def list_projects(
     request: Request,
     current_user: str = Depends(_get_current_user)
 ):
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        projects = list(db.get("projects", {}).values())
+        projects.sort(key=lambda p: p.get("updated_at", ""), reverse=True)
+        return {"status": "ok", "projects": projects}
     try:
         sb = _supabase()
         res = (sb.table("projects")
@@ -868,6 +889,17 @@ async def save_project(
     payload: ProjectSaveRequest,
     current_user: str = Depends(_get_current_user)
 ):
+    if _OFFLINE_MODE:
+        import uuid, datetime
+        db = _local_db_read()
+        pid = str(uuid.uuid4())
+        now = datetime.datetime.utcnow().isoformat()
+        project = {"id": pid, "user_id": "local_user", "name": payload.name,
+                   "description": payload.description, "canvas": payload.canvas,
+                   "created_at": now, "updated_at": now}
+        db.setdefault("projects", {})[pid] = project
+        _local_db_write(db)
+        return {"status": "ok", "project": project}
     try:
         sb = _supabase()
         res = sb.table("projects").insert({
@@ -894,6 +926,18 @@ async def update_project(
     payload: ProjectUpdateRequest,
     current_user: str = Depends(_get_current_user)
 ):
+    if _OFFLINE_MODE:
+        import datetime
+        db = _local_db_read()
+        project = db.get("projects", {}).get(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if payload.name is not None: project["name"] = payload.name
+        if payload.description is not None: project["description"] = payload.description
+        if payload.canvas is not None: project["canvas"] = payload.canvas
+        project["updated_at"] = datetime.datetime.utcnow().isoformat()
+        _local_db_write(db)
+        return {"status": "ok", "project": project}
     try:
         sb = _supabase()
         check = (sb.table("projects")
@@ -930,6 +974,12 @@ async def delete_project(
     project_id: str,
     current_user: str = Depends(_get_current_user)
 ):
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        if project_id in db.get("projects", {}):
+            del db["projects"][project_id]
+            _local_db_write(db)
+        return {"status": "ok"}
     try:
         sb = _supabase()
         check = (sb.table("projects")
@@ -960,6 +1010,12 @@ async def load_project(
     project_id: str,
     current_user: str = Depends(_get_current_user)
 ):
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        project = db.get("projects", {}).get(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        return {"status": "ok", "project": project}
     try:
         sb = _supabase()
         res = (sb.table("projects")
@@ -1960,6 +2016,18 @@ async def save_custom_block(
     current_user: str = Depends(_get_current_user)
 ):
     """Save a verified custom block to the user's library."""
+    if _OFFLINE_MODE:
+        import uuid, datetime
+        db = _local_db_read()
+        bid = str(uuid.uuid4())
+        block = {"id": bid, "user_id": "local_user", "name": payload.name,
+                 "description": payload.description, "schema": payload.block_schema,
+                 "verilog": payload.verilog, "ports": payload.ports,
+                 "block_type": payload.block_type,
+                 "created_at": datetime.datetime.utcnow().isoformat()}
+        db.setdefault("custom_blocks", {})[bid] = block
+        _local_db_write(db)
+        return {"status": "ok", "id": bid}
     try:
         sb  = _supabase()
         row = {
@@ -1987,6 +2055,14 @@ async def get_custom_blocks(
     current_user: str = Depends(_get_current_user)
 ):
     """Fetch all custom blocks for the current user."""
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        blocks = list(db.get("custom_blocks", {}).values())
+        blocks.sort(key=lambda b: b.get("created_at", ""), reverse=True)
+        lite = [{"id": b["id"], "name": b["name"], "description": b.get("description",""),
+                 "ports": b["ports"], "block_type": b["block_type"],
+                 "created_at": b["created_at"]} for b in blocks]
+        return {"status": "ok", "blocks": lite}
     try:
         sb  = _supabase()
         res = (sb.table('custom_blocks')
@@ -2008,6 +2084,12 @@ async def delete_custom_block(
     current_user: str = Depends(_get_current_user)
 ):
     """Delete a custom block (only if owned by current user)."""
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        if block_id in db.get("custom_blocks", {}):
+            del db["custom_blocks"][block_id]
+            _local_db_write(db)
+        return {"status": "ok"}
     try:
         sb = _supabase()
         (sb.table('custom_blocks')
@@ -2029,6 +2111,12 @@ async def get_custom_block_full(
     current_user: str = Depends(_get_current_user)
 ):
     """Fetch a single custom block including its full verilog source."""
+    if _OFFLINE_MODE:
+        db = _local_db_read()
+        block = db.get("custom_blocks", {}).get(block_id)
+        if not block:
+            return {"status": "error", "error": "Block not found."}
+        return {"status": "ok", **block}
     try:
         sb  = _supabase()
         res = (sb.table('custom_blocks')

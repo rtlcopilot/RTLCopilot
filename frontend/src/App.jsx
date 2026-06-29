@@ -6,6 +6,8 @@ import PDPage from "./PDPage";
 import { T, GLOBAL_CSS } from "./constants";
 import { GRID_X, GRID_Y, MAX_COLS } from "./constants";
 import { API_BASE, supabase } from "./config";
+
+const OFFLINE_MODE = import.meta.env.VITE_OFFLINE_MODE === "true";
 import { nextFreeIndex, detectLoops, stripNodeForSave } from "./utils";
 import { COMPONENTS, COMPONENT_CATEGORIES } from "./componentCategories";
 import { nodeTypes, edgeTypes } from "./nodeTypes";
@@ -154,6 +156,7 @@ export default function App() {
   }, []);
 
   const _authHeaders = async () => {
+    if (OFFLINE_MODE) return { "Content-Type": "application/json" };
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token;
     const storedKey = localStorage.getItem("rtl_byok_key") || "";
@@ -192,6 +195,11 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (OFFLINE_MODE) {
+      setUser({ id: "local_user", name: "Local User", email: "local@offline.dev", avatar: null });
+      fetchProjects();
+      return;
+    }
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
         const u = session.user;

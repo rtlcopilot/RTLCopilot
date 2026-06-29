@@ -198,6 +198,22 @@ It is **experimental**. Known limitations are documented in [KNOWN_ISSUES.md](KN
 
 ---
 
+## Acknowledgements
+
+RTLCopilot builds on the shoulders of incredible open source projects:
+
+- [Yosys](https://yosyshq.net/yosys/) — open source synthesis suite by Clifford Wolf
+- [OpenROAD](https://theopenroadproject.org/) — open source RTL-to-GDS flow
+- [KLayout](https://www.klayout.de/) — GDS viewer and DRC engine
+- [Sky130 PDK](https://github.com/google/skywater-pdk) — open source process design kit by SkyWater and Google
+- [iverilog](https://steveicarus.github.io/iverilog/) — open source Verilog simulator by Stephen Williams
+- [ReactFlow](https://reactflow.dev/) — canvas library powering the visual designer
+- [Supabase](https://supabase.com/) — open source Firebase alternative for auth and storage
+
+RTLCopilot would not exist without these projects and the communities behind them.
+
+---
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -4,6 +4,42 @@ RTLCopilot was created by [Suchit Tilak](https://github.com/rtlcopilot). Contrib
 
 ---
 
+## Quick setup for contributors (Offline mode)
+
+If you just want to test RTL Brain, fix a bug, or explore the codebase — use offline mode. It bypasses Supabase and Google OAuth entirely.
+
+**Backend `.env`:**
+```
+OFFLINE_MODE=true
+ALLOWED_ORIGINS=http://localhost:5173
+```
+
+**Frontend `.env`:**
+```
+VITE_OFFLINE_MODE=true
+VITE_API_URL=http://localhost:8080
+```
+
+Then:
+```bash
+# Backend
+cd backend
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+source .venv/bin/activate  # macOS/Linux
+pip install -r requirements.txt
+uvicorn api:app --reload --port 8080
+
+# Frontend (new terminal)
+cd frontend
+npm install
+npm run dev
+```
+
+App loads at `http://localhost:5173`. You're auto-logged in as "Local User". Projects and custom blocks save to `backend/local_db.json` on your machine. No Supabase account needed.
+
+---
+
 ## Getting started
 
 1. Fork the repo and clone locally
