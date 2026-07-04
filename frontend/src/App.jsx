@@ -156,7 +156,17 @@ export default function App() {
   }, []);
 
   const _authHeaders = async () => {
-    if (OFFLINE_MODE) return { "Content-Type": "application/json" };
+    if (OFFLINE_MODE) {
+      const headers = { "Content-Type": "application/json" };
+      const storedKey = localStorage.getItem("rtl_byok_key") || "";
+      if (storedKey.trim()) {
+        headers["X-User-Api-Key"] = storedKey.trim();
+        headers["X-User-Api-Provider"] = localStorage.getItem("rtl_byok_provider") || "openai";
+        const storedModel = localStorage.getItem("rtl_byok_model") || "";
+        if (storedModel.trim()) headers["X-User-Model"] = storedModel.trim();
+      }
+      return headers;
+    }
     const { data: { session } } = await supabase.auth.getSession();
     const token = session?.access_token;
     const storedKey = localStorage.getItem("rtl_byok_key") || "";
