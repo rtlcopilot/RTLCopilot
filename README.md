@@ -130,10 +130,10 @@ Enable Google OAuth in your Supabase project:
 
 ```bash
 cd backend
-cp .env.example .env
+cp .env.example .env   # Windows CMD: use "copy .env.example .env"
 # Fill in SUPABASE_URL and SUPABASE_SERVICE_KEY in .env
 pip install -r requirements.txt
-uvicorn api:app --reload --port 8080
+uvicorn api:app --port 8080
 ```
 
 ---
@@ -142,7 +142,7 @@ uvicorn api:app --reload --port 8080
 
 ```bash
 cd frontend
-cp .env.example .env
+cp .env.example .env # Windows CMD: use "copy .env.example .env"
 # Fill in VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_API_URL in .env
 npm install
 npm run dev

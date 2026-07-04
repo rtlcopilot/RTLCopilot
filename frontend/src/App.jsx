@@ -257,6 +257,11 @@ export default function App() {
     setParams([{ name: "DATA_WIDTH", value: "8" }]);
     setVerilogFiles({}); setTestbenchCode("");
     setRtlReady(false); setTbReady(false);
+    setCanonicalIR(null);
+    setSimulationResult(null); setShowWaveform(false);
+    setVerifyHistory([]);
+    setChatHistory([{ role: "assistant", text: "Hello! I can help you design circuits. What should we build?" }]);
+    setTbSteps([{ time: 0, values: {} }]); setTbConfigDirty(false);
     setCurrentProjectId(null); setProjectName("Untitled Design"); setIsDirty(false);
   };
 
@@ -317,6 +322,10 @@ export default function App() {
         setProjectName(d.project.name); setCurrentProjectId(proj.id);
         setIsDirty(false); setRtlReady(false); setTbReady(false);
         setVerilogFiles({}); setTestbenchCode("");
+        setCanonicalIR(null);
+        setSimulationResult(null); setShowWaveform(false);
+        setVerifyHistory([]);
+        setTbSteps([{ time: 0, values: {} }]); setTbConfigDirty(false);
         showToast(`Loaded "${proj.name}"`, "success");
       } else {
         showToast("Failed to load — project data is empty", "error");
@@ -341,34 +350,42 @@ export default function App() {
     setNodes((nds) => nds.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, value: newValue } } : node));
   }, [setNodes]);
 
-  const hydrateNode = useCallback((node) => ({
-    ...node,
-    data: {
-      ...node.data,
-      onChangeValue: handleValueChange,
-      onDelete: (id) => { setNodes((nds) => nds.filter((n) => n.id !== id)); setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id)); },
-      setWidth:       (w) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, width: w } } : n)),
-      setBitIndex:    (i) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, bitIndex: i } } : n)),
-      setMuxSize:     (s) => {
-        const numInputs = parseInt(s) || 2;
-        const selWidth  = Math.max(1, Math.ceil(Math.log2(numInputs)));
-        setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, muxSize: s, selWidth } } : n));
+  // Generic node field updater — avoids stale closure over node.id
+  const _updateNodeField = useCallback((nodeId, field, value) => {
+    setNodes((ns) => ns.map((n) => n.id === nodeId ? { ...n, data: { ...n.data, [field]: value } } : n));
+  }, [setNodes]);
+
+  const hydrateNode = useCallback((node) => {
+    const nid = node.id;
+    return {
+      ...node,
+      data: {
+        ...node.data,
+        onChangeValue: handleValueChange,
+        onDelete: (id) => { setNodes((nds) => nds.filter((n) => n.id !== id)); setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id)); },
+        setWidth:       (w) => _updateNodeField(nid, "width", w),
+        setBitIndex:    (i) => _updateNodeField(nid, "bitIndex", i),
+        setMuxSize:     (s) => {
+          const numInputs = parseInt(s) || 2;
+          const selWidth  = Math.max(1, Math.ceil(Math.log2(numInputs)));
+          setNodes((ns) => ns.map((n) => n.id === nid ? { ...n, data: { ...n.data, muxSize: s, selWidth } } : n));
+        },
+        setJoinerSize:  (s) => _updateNodeField(nid, "joinerSize", s),
+        setValue:       (v) => _updateNodeField(nid, "value", v),
+        setIterations:  (it) => _updateNodeField(nid, "iterations", it),
+        setFifoDepth:   (v) => _updateNodeField(nid, "fifoDepth", v),
+        setAeThresh:    (v) => _updateNodeField(nid, "aeThresh", v),
+        rename:         (name) => _updateNodeField(nid, "name", name),
+        setLsbPriority: (v) => _updateNodeField(nid, "lsbPriority", v),
+        setFsmOutputs:  (v) => _updateNodeField(nid, "fsmOutputs", v),
+        setEdgeType:    (v) => _updateNodeField(nid, "edgeType", v),
+        setAddrWidth:   (v) => _updateNodeField(nid, "addrWidth", v),
+        setCountDir:    (v) => _updateNodeField(nid, "countDir", v),
+        setSrMode:      (v) => _updateNodeField(nid, "srMode", v),
+        setShiftDir:    (v) => _updateNodeField(nid, "shiftDir", v),
       },
-      setJoinerSize:  (s) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, joinerSize: s } } : n)),
-      setValue:       (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, value: v } } : n)),
-      setIterations:  (it) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, iterations: it } } : n)),
-      setFifoDepth:   (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, fifoDepth: v } } : n)),
-      setAeThresh:    (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, aeThresh: v } } : n)),
-      rename:         (name) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, name } } : n)),
-      setLsbPriority: (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, lsbPriority: v } } : n)),
-      setFsmOutputs:  (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, fsmOutputs: v } } : n)),
-      setEdgeType:    (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, edgeType: v } } : n)),
-      setAddrWidth:   (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, addrWidth: v } } : n)),
-      setCountDir:    (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, countDir: v } } : n)),
-      setSrMode:      (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, srMode: v } } : n)),
-      setShiftDir:    (v) => setNodes((ns) => ns.map((n) => n.id === node.id ? { ...n, data: { ...n.data, shiftDir: v } } : n)),
-    },
-  }), [setNodes, setEdges, handleValueChange]);
+    };
+  }, [setNodes, setEdges, handleValueChange, _updateNodeField]);
 
   const handleDeleteCustomBlock = async (blockId) => {
     try {
@@ -751,6 +768,9 @@ export default function App() {
 
   const runSimulation = async () => {
     if (!verilogFiles["top.v"] || !testbenchCode) { showToast("Generate RTL and Testbench first", "error"); return; }
+    // Block simulation if DRC found combinational loops — iverilog will hang
+    const hasLoops = drcLogs.some((l) => l.msg && l.msg.includes("Infinite Loop"));
+    if (hasLoops) { showToast("Fix combinational loops (DRC tab) before simulating", "error"); setShowBottomPanel(true); setActiveTab("drc"); return; }
     setSimulating(true);
     try {
       const response = await fetch(`${API_BASE}/simulate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verilog_files: verilogFiles, testbench: testbenchCode }) });

@@ -2156,7 +2156,7 @@ async def simulate_design(payload: SimulateRequest):
                 return {"status":"error","error":"Compilation failed","details":cr.stderr}
 
             sr = subprocess.run(["vvp", str(p/"sim")],
-                                 capture_output=True, text=True, cwd=str(p), timeout=10)
+                                 capture_output=True, text=True, cwd=str(p), timeout=30)
             if sr.returncode != 0:
                 return {"status":"error","error":"Simulation failed","details":sr.stderr}
 
@@ -2326,7 +2326,7 @@ def _run_simulation_internal(ir: dict, stimulus: dict, verilog_files: dict) -> d
                     "details": cr.stderr, "testbench": testbench}
 
         sr = subprocess.run(["vvp", str(p / "sim")],
-                            capture_output=True, text=True, cwd=str(p), timeout=15)
+                            capture_output=True, text=True, cwd=str(p), timeout=30)
 
         console    = sr.stdout
         pass_count = 0
@@ -6922,7 +6922,7 @@ async def _iverilog_compile_check(verilog_files: dict) -> tuple[bool, str]:
             dfiles = [str(p / f) for f in verilog_files]
             result = subprocess.run(
                 ["iverilog", "-tnull", "-s", "top"] + dfiles,
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
                 return True, ""
