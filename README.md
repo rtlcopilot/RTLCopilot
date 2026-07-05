@@ -155,7 +155,7 @@ npm run dev
 The physical design pipeline runs inside a Docker container with OpenROAD, Yosys, and the Sky130 PDK pre-installed.
 
 ```bash
-cd pd
+cd pdtools
 docker compose up
 ```
 
