@@ -98,6 +98,78 @@ async function callPDAssist({ mode, stage, logs, runId, config, verilogFiles, ou
   return data.reply;
 }
 
+// PD verification 
+
+const CHECKED_STAGES = ["synthesis", "placement", "cts", "routing"];
+
+function getAuthToken() {
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.includes("auth") || key.includes("session") || key.startsWith("sb-")) {
+        const val = JSON.parse(localStorage.getItem(key) || "{}");
+        if (val?.access_token) return val.access_token;
+        if (val?.session?.access_token) return val.session.access_token;
+      }
+    }
+  } catch (_) {}
+  return "";
+}
+
+// User-configured thresholds travel as query params — changing a threshold in
+// Config re-evaluates checks instantly, no stage re-run needed.
+function checkThresholdQuery(stageId, configs) {
+  const params = new URLSearchParams();
+  const num = v => v != null && v !== "" && !isNaN(parseFloat(v));
+  if (stageId === "placement") {
+    if (num(configs?.placement?.wns_margin_ns)) params.set("wns_margin_ns", configs.placement.wns_margin_ns);
+    if (num(configs?.placement?.max_util_pct))  params.set("max_util_pct",  configs.placement.max_util_pct);
+  }
+  if (stageId === "cts") {
+    if (num(configs?.cts?.wns_margin_ns)) params.set("wns_margin_ns", configs.cts.wns_margin_ns);
+  }
+  const q = params.toString();
+  return q ? "?" + q : "";
+}
+
+async function fetchStageChecks(runId, stageId, configs) {
+  const res = await fetch(PD_API + "/check/" + runId + "/" + stageId + checkThresholdQuery(stageId, configs));
+  if (!res.ok) throw new Error("check fetch failed: " + res.status);
+  return await res.json();
+}
+
+// LLM explains only — all fix values were already computed in pd_verification.py
+async function callCheckExplain({ stage, checks, fixes, guidance }) {
+  const authToken = getAuthToken();
+  const res = await fetch(MAIN_API + "/pd_assist", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authToken ? { "Authorization": "Bearer " + authToken } : {}),
+    },
+    body: JSON.stringify({ mode: "check_explain", stage, checks, fixes, guidance }),
+  });
+  if (!res.ok) throw new Error("Backend error " + res.status);
+  const data = await res.json();
+  if (data.status === "error") throw new Error(data.explanation || "AI unavailable");
+  return data.explanation;
+}
+
+const CHECK_STATUS_RANK = { error: 3, warning: 2, unset: 1, ok: 0 };
+const CHECK_DOT_CLS = {
+  ok: "bg-green-400", warning: "bg-yellow-400",
+  error: "bg-red-400", unset: "bg-gray-500",
+};
+
+function worstCheckStatus(checkData) {
+  let worst = null;
+  for (const c of checkData?.checks || []) {
+    if (worst === null || (CHECK_STATUS_RANK[c.status] ?? 0) > (CHECK_STATUS_RANK[worst] ?? 0)) {
+      worst = c.status;
+    }
+  }
+  return worst;
+}
+
 const STAGES = [
   { id: "synthesis", name: "Synthesis",       tool: "Yosys",    outputFile: "netlist.v",     outputLabel: "Netlist (.v)"       },
   { id: "floorplan", name: "Floorplan",        tool: "OpenROAD", outputFile: "floorplan.def", outputLabel: "Floorplan (.def)"   },
@@ -126,6 +198,8 @@ const DEFAULT_CONFIGS = {
     density: 0.6, timing_driven: true,
     congestion_driven: false, cell_padding: 4,
     clock_port: "clk", clock_period_ns: 10,
+    // verification thresholds — empty = unchecked ("unset" status)
+    wns_margin_ns: "", max_util_pct: "",
   },
   routing: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
@@ -147,6 +221,8 @@ const DEFAULT_CONFIGS = {
     clock_port: "clk", clock_period_ns: 10,
     cts_buf_list: "sky130_fd_sc_hd__clkbuf_4 sky130_fd_sc_hd__clkbuf_8",
     cts_max_slew: 0.4, cts_max_cap: 0.08,
+    // verification threshold — empty = unchecked ("unset" status)
+    wns_margin_ns: "",
   },
   spef: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
@@ -250,6 +326,9 @@ const TOOLTIPS = {
   straps_layer: "Metal layer for power straps running across the chip. met4 is standard for Sky130. Higher layers have lower resistance for better power distribution.",
   straps_width: "Width of power straps in microns. Wider straps have lower resistance (better IR drop) but consume more routing area. 1.6µm is typical.",
   straps_pitch: "Distance between power straps in microns. Smaller pitch improves power delivery but uses more metal. 27.1µm matches the Sky130 standard cell height grid.",
+
+  wns_margin_ns: "Verification threshold: the minimum positive setup slack you consider healthy. Checks report a warning when WNS is positive but below this margin. Negative WNS is always an error. Leave empty to skip margin checking.",
+  max_util_pct: "Verification threshold: maximum acceptable core utilization in percent. The placement check fails when utilization exceeds this. Leave empty to skip this check.",
 
   clock_port_cts: "The clock input port name. CTS will build a balanced tree from this port to all flip-flop clock pins.",
   cts_buf_list: "Clock buffer cells used to build the clock tree. clkbuf_4 and clkbuf_8 are standard choices. The number suffix indicates drive strength.",
@@ -361,6 +440,14 @@ function ConfigPanel({ stageId, config, onChange }) {
           </Field>
         </div>
       )}
+      <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
+        <Field label="✓ WNS Margin (ns)" tip={TOOLTIPS.wns_margin_ns}>
+          <Inp type="number" value={config.wns_margin_ns ?? ""} onChange={v => set("wns_margin_ns", isNaN(v) ? "" : v)} min={0} max={10} step={0.1} />
+        </Field>
+        <Field label="✓ Max Utilization (%)" tip={TOOLTIPS.max_util_pct}>
+          <Inp type="number" value={config.max_util_pct ?? ""} onChange={v => set("max_util_pct", isNaN(v) ? "" : v)} min={1} max={100} step={1} />
+        </Field>
+      </div>
     </div>
   );
 
@@ -450,6 +537,11 @@ function ConfigPanel({ stageId, config, onChange }) {
       <Field label="Buffer Cells (space-separated)" tip={TOOLTIPS.cts_buf_list}>
         <Inp value={config.cts_buf_list} onChange={v => set("cts_buf_list", v)} />
       </Field>
+      <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
+        <Field label="✓ WNS Margin (ns)" tip={TOOLTIPS.wns_margin_ns}>
+          <Inp type="number" value={config.wns_margin_ns ?? ""} onChange={v => set("wns_margin_ns", isNaN(v) ? "" : v)} min={0} max={10} step={0.1} />
+        </Field>
+      </div>
     </div>
   );
 
@@ -465,6 +557,140 @@ function ConfigPanel({ stageId, config, onChange }) {
   );
 
   return null;
+}
+
+// Verification checks UI 
+
+function CheckStatusIcon({ status }) {
+  if (status === "ok")      return <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0 mt-0.5" />;
+  if (status === "warning") return <AlertCircle  className="w-4 h-4 text-yellow-400 shrink-0 mt-0.5" />;
+  if (status === "error")   return <AlertCircle  className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />;
+  return <Circle className="w-4 h-4 text-gray-500 shrink-0 mt-0.5" />;
+}
+
+const CHECK_BORDER_CLS = {
+  ok: "border-[#1e1e2e]", warning: "border-yellow-800",
+  error: "border-red-800", unset: "border-[#2a2a3a] border-dashed",
+};
+
+function ChecksPanel({ data, onOpenFix }) {
+  const checks = data?.checks || [];
+  return (
+    <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
+      {checks.length === 0 && (
+        <div className="text-xs text-[#888896]">No checks available for this stage yet — run the stage first.</div>
+      )}
+      {checks.map(c => (
+        <div key={c.id}
+          className={"bg-[#12121a] border rounded-lg p-3 flex items-start gap-3 " + (CHECK_BORDER_CLS[c.status] || "border-[#1e1e2e]")}>
+          <CheckStatusIcon status={c.status} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold">{c.label}</span>
+              <span className="font-mono text-xs text-[#8b5cf6] shrink-0">
+                {c.value ?? "—"}{c.value != null ? (c.unit || "") : ""}
+              </span>
+            </div>
+            <p className="text-xs text-[#888896] mt-0.5">{c.message}</p>
+          </div>
+          {(c.status === "warning" || c.status === "error") && (
+            <button onClick={() => onOpenFix(c)}
+              className="shrink-0 px-2.5 py-1 rounded text-xs font-semibold border border-[#8b5cf6] text-[#8b5cf6]
+                hover:bg-[#8b5cf6] hover:text-white transition-colors">
+              Explain & Fix
+            </button>
+          )}
+        </div>
+      ))}
+      {data?.guidance && (
+        <div className="bg-yellow-900 bg-opacity-20 border border-yellow-800 rounded-lg p-3">
+          <p className="text-xs font-semibold text-yellow-400 mb-1">No config-level fix — look upstream</p>
+          <p className="text-xs text-yellow-200">{data.guidance}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExplainFixDialog({ stageId, checkData, focusCheck, onApply, onApplyAndRerun, onClose }) {
+  const failing = (checkData?.checks || []).filter(c => c.status === "warning" || c.status === "error");
+  // Never show a no-op fix — proposed must differ from current
+  const fixes = (checkData?.fixes || []).filter(f => f.proposed_value !== f.current_value);
+  const [explanation, setExplanation] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [vals, setVals] = useState(() => fixes.map(f => String(f.proposed_value)));
+
+  useEffect(() => {
+    let alive = true;
+    callCheckExplain({ stage: stageId, checks: failing, fixes, guidance: checkData?.guidance || "" })
+      .then(e => { if (alive) setExplanation(e); })
+      .catch(() => { if (alive) setExplanation("AI explanation unavailable — the computed fixes below are still valid."); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+  }, []);
+
+  const parseVal = (fix, s) => {
+    if (typeof fix.proposed_value !== "number") return s;
+    const n = parseFloat(s);
+    return isNaN(n) ? fix.proposed_value : n;
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-60 z-50 flex items-center justify-center p-6">
+      <div className="bg-[#12121a] border border-[#1e1e2e] rounded-xl w-[560px] max-h-[85vh] overflow-y-auto p-5 space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-bold">Explain & Fix — {focusCheck?.label || stageId}</h2>
+          <button onClick={onClose} className="text-[#888896] hover:text-white text-lg leading-none">✕</button>
+        </div>
+
+        {/* AI explanation — the LLM explains, it never computes values */}
+        <div className="bg-[#0a0a0f] border border-[#2a2a3a] rounded-lg p-3">
+          <p className="text-xs font-semibold text-[#8b5cf6] mb-1.5">AI Explanation</p>
+          {loading
+            ? <div className="flex items-center gap-2 text-xs text-[#888896]"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analyzing checks…</div>
+            : <p className="text-xs text-[#e0e0e8] leading-relaxed">{explanation}</p>}
+        </div>
+
+        {/* Deterministic pre-computed fixes */}
+        {fixes.length > 0 ? fixes.map((fix, i) => (
+          <div key={fix.id || i} className="bg-[#0d0d16] border border-[#2a2a3a] rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-semibold">{fix.label}</span>
+              <span className="font-mono text-xs text-[#888896]">{fix.stage} → {fix.field}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="line-through font-mono text-sm text-[#888896]">{String(fix.current_value ?? "—")}</span>
+              <span className="text-[#8b5cf6]">→</span>
+              <input
+                value={vals[i]}
+                onChange={e => setVals(p => p.map((v, j) => j === i ? e.target.value : v))}
+                className="flex-1 bg-[#0a0a0f] border border-[#8b5cf6] rounded px-2 py-1 text-sm font-mono text-[#e0e0e8] outline-none" />
+            </div>
+            <p className="text-xs text-[#888896]">{fix.reason}</p>
+            <p className="text-xs text-[#666672] font-mono leading-relaxed bg-[#0a0a0f] rounded p-2">{fix.context}</p>
+            <div className="flex gap-2 pt-1">
+              <button onClick={() => { onApply(fix, parseVal(fix, vals[i])); onClose(); }}
+                className="flex-1 py-1.5 rounded text-xs font-semibold border border-[#8b5cf6] text-[#8b5cf6]
+                  hover:bg-[#8b5cf6] hover:text-white transition-colors">
+                Apply
+              </button>
+              <button onClick={() => { const v = parseVal(fix, vals[i]); onClose(); onApplyAndRerun(fix, v, stageId); }}
+                className="flex-1 py-1.5 rounded text-xs font-semibold bg-[#8b5cf6] text-white hover:bg-[#a78bfa] transition-colors">
+                Apply & Re-run {fix.stage !== stageId ? "from " + fix.stage : ""}
+              </button>
+            </div>
+          </div>
+        )) : (
+          <div className="bg-[#0d0d16] border border-[#2a2a3a] rounded-lg p-3">
+            <p className="text-xs text-[#888896]">
+              {checkData?.guidance ||
+                "No deterministic config fix is available for this check. See the explanation above."}
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function AIExplainer({ logs, stage, runId, config, verilogFiles, outputs }) {
@@ -2029,14 +2255,55 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
   const [configs,      setConfigs]      = useState(Object.fromEntries(Object.entries(DEFAULT_CONFIGS).map(([k, v]) => [k, { ...v }])));
   const [showConfig,   setShowConfig]   = useState(false);
   const [dlState,      setDlState]      = useState(Object.fromEntries(STAGES.map(s => [s.id, "idle"])));
+  const [layoutView,   setLayoutView]   = useState(null);
   const [dockerReady,  setDockerReady]  = useState(false);
   const [dockerPrompt, setDockerPrompt] = useState(null);
   const [containerLog, setContainerLog] = useState([]);
   const [showHistory,  setShowHistory]  = useState(false);
   const [terminalView, setTerminalView] = useState("terminal"); 
+  const [stageChecks,  setStageChecks]  = useState({});   // stageId → /check payload
+  const [fixDialog,    setFixDialog]    = useState(null); // { stageId, check }
 
   const outputRef  = useRef(null);
+  const stagesRef  = useRef(null);
   const isDesktop  = typeof window !== "undefined" && !!window.electronAPI;
+  useEffect(() => { stagesRef.current = stages; }, [stages]);
+
+  // Re-evaluate checks instantly when threshold config values change.
+  // Debounced so rapid typing doesn't fire multiple fetches.
+  useEffect(() => {
+    if (!runId) return;
+    const timer = setTimeout(() => {
+      const thresholdStages = ["placement", "cts"];
+      for (const sid of thresholdStages) {
+        const stage = stages.find(s => s.id === sid);
+        if (stage && stage.status === "complete") {
+          refreshChecks(sid, runId, configs, false);
+        }
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [
+    configs?.placement?.wns_margin_ns,
+    configs?.placement?.max_util_pct,
+    configs?.cts?.wns_margin_ns,
+  ]);
+
+  // Refresh verification checks for one stage; failures are non-fatal.
+  // autoSwitch=true: switch to Checks tab if errors/warnings found (used after stage run)
+  // autoSwitch=false: silent refresh, don't change the current tab (used for threshold changes)
+  const refreshChecks = async (stageId, runIdArg, cfgs, autoSwitch = true) => {
+    if (!CHECKED_STAGES.includes(stageId)) return null;
+    try {
+      const d = await fetchStageChecks(runIdArg, stageId, cfgs);
+      setStageChecks(p => ({ ...p, [stageId]: d }));
+      if (autoSwitch && stageId === selected) {
+        const worst = worstCheckStatus(d);
+        if (worst === "error" || worst === "warning") setTerminalView("checks");
+      }
+      return d;
+    } catch (_) { return null; }
+  };
 
   useEffect(() => {
     const session = loadSession();
@@ -2066,6 +2333,11 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
         }));
         if (session.configs) setConfigs(session.configs);
         if (session.outputs) setOutputs(session.outputs);
+        // Restore verification checks for every completed checkable stage
+        const cfgsForChecks = session.configs || configs;
+        for (const sid of CHECKED_STAGES) {
+          if (meta.stages?.[sid]) refreshChecks(sid, session.runId, cfgsForChecks);
+        }
       })
       .catch(() => {
         if (session.configs) setConfigs(session.configs);
@@ -2165,6 +2437,15 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
     if (selected === "drc" && !hadError) setTerminalView("drc");
       if (!hadError) appendLine(selected, "[DONE] " + currentStage.name + " completed in " + elapsed + "s");
 
+      // Verification: run checks after the stage completes (fetch even on
+      // error — partial metrics still help). Auto-open the Checks tab when
+      // something needs attention.
+      const checkData = await refreshChecks(selected, runId, configs, true);
+      if (checkData) {
+        const worst = worstCheckStatus(checkData);
+        if (worst === "error" || worst === "warning") setTerminalView("checks");
+      }
+
     } catch (err) {
       appendLine(selected, "[ERROR] " + err.message);
       setStatus(selected, "error");
@@ -2200,9 +2481,63 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
       full += chunk;
       chunk.split("\n").forEach(l => { if (l.trim()) appendLine(stageId, l); });
     }
-    const hadError = full.includes("[ERROR") || full.includes("exit code: 1");
+    const hadError = full.includes("[ERROR") || full.includes("exit code: 1") || full.includes("Error:");
     setStatus(stageId, hadError ? "error" : "complete");
+    await refreshChecks(stageId, runId, cfgs);
     if (hadError) throw new Error(stageId + " failed");
+  };
+
+  // ── Verification fix application ────────────────────────────────────────────
+
+  const buildConfigsWithFix = (fix, value) => {
+    const next = { ...configs, [fix.stage]: { ...configs[fix.stage], [fix.field]: value } };
+    // A clock period mismatch between stages is a classic footgun — keep the
+    // period consistent everywhere it appears when a fix changes it.
+    if (fix.field === "clock_period_ns") {
+      for (const sid of ["synthesis", "placement", "cts", "timing"]) {
+        if (next[sid] && next[sid].clock_period_ns != null) {
+          next[sid] = { ...next[sid], clock_period_ns: value };
+        }
+      }
+    }
+    return next;
+  };
+
+  // "Apply": write config, navigate to the stage, open its Config panel.
+  const applyFix = (fix, value) => {
+    setConfigs(buildConfigsWithFix(fix, value));
+    setSelected(fix.stage);
+    setShowConfig(true);
+  };
+
+  // Re-run the flow from the fixed stage through the checked stage, skipping
+  // optional stages (pdn/cts/spef…) that were never run in this flow.
+  const rerunChain = async (fromStage, toStage, cfgs) => {
+    const order = STAGES.map(s => s.id);
+    const from = order.indexOf(fromStage);
+    let to = order.indexOf(toStage);
+    if (from < 0) return;
+    if (to < from) to = from;
+    const required = new Set(["synthesis", "floorplan", "placement", "routing"]);
+    for (let i = from; i <= to; i++) {
+      const id = order[i];
+      if (!required.has(id)) {
+        const wasRun = (stagesRef.current || []).find(s => s.id === id)?.status === "complete";
+        if (!wasRun) continue; // optional stage the user never ran — keep skipping it
+      }
+      try {
+        await runStageForFix(id, cfgs);
+      } catch (_) {
+        return; // stop the chain on failure — the failing stage is now selected
+      }
+    }
+  };
+
+  // "Apply & Re-run": apply, then automatically re-run every stale stage.
+  const applyFixAndRerun = async (fix, value, checkedStage) => {
+    const next = buildConfigsWithFix(fix, value);
+    setConfigs(next);
+    await rerunChain(fix.stage, checkedStage, next);
   };
 
   const handleDownload = async (stageId) => {
@@ -2238,10 +2573,15 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
         return { ...s, status: "complete", timeTaken: stageData.time_s || 0 };
       }));
       setOutputs({});  
+      setStageChecks({});
+      for (const sid of CHECKED_STAGES) {
+        if (meta.stages?.[sid]) refreshChecks(sid, restoredRunId, configs);
+      }
     } catch {
       setRunId(restoredRunId);
       setStages(p => p.map(s => ({ ...s, status: "pending", timeTaken: 0 })));
       setOutputs({});
+      setStageChecks({});
     }
   };
 
@@ -2265,6 +2605,24 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
     <div className="flex h-screen bg-[#0a0a0f] text-[#e0e0e8]">
       {dockerPrompt && <DockerPrompt reason={dockerPrompt} onClose={onBack} />}
       {showHistory && <RunHistory onRestore={handleRestore} onClose={() => setShowHistory(false)} />}
+      {layoutView && (
+        <LayoutViewer
+          runId={runId}
+          view={layoutView.view}
+          label={layoutView.label}
+          onClose={() => setLayoutView(null)}
+        />
+      )}
+      {fixDialog && stageChecks[fixDialog.stageId] && (
+        <ExplainFixDialog
+          stageId={fixDialog.stageId}
+          checkData={stageChecks[fixDialog.stageId]}
+          focusCheck={fixDialog.check}
+          onApply={applyFix}
+          onApplyAndRerun={applyFixAndRerun}
+          onClose={() => setFixDialog(null)}
+        />
+      )}
 
       {/* LEFT SIDEBAR */}
       <div className="w-60 bg-[#0a0a0f] border-r border-[#1e1e2e] flex flex-col shrink-0">
@@ -2319,6 +2677,13 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
                     <div className="text-sm font-medium truncate">{stage.name}</div>
                     {stage.timeTaken > 0 && <div className="text-xs text-[#888896]">{stage.timeTaken.toFixed(2)}s</div>}
                   </div>
+                  {stageChecks[stage.id] && (() => {
+                    const worst = worstCheckStatus(stageChecks[stage.id]);
+                    return worst
+                      ? <div title={"Checks: " + worst}
+                          className={"w-2 h-2 rounded-full shrink-0 " + (CHECK_DOT_CLS[worst] || "bg-gray-500")} />
+                      : null;
+                  })()}
                 </div>
               </button>
 
@@ -2401,13 +2766,20 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
             <div className="flex items-center justify-between px-4 py-2 border-b border-[#1e1e2e] shrink-0">
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs font-semibold text-[#888896]">Terminal Output</span>
-                {((outputs[selected] || []).length > 0 || selected === "placement" || selected === "routing") && (
+                {((outputs[selected] || []).length > 0 || selected === "placement" || selected === "routing" || stageChecks[selected]) && (
                   <div className="flex rounded overflow-hidden border border-[#2a2a3a]">
                     <button onClick={() => setTerminalView("terminal")}
                       className={"px-2 py-0.5 text-xs transition-colors " +
                         (terminalView === "terminal" ? "bg-[#8b5cf6] text-white" : "text-[#888896] hover:text-white")}>
                       Logs
                     </button>
+                    {stageChecks[selected] && (
+                      <button onClick={() => setTerminalView("checks")}
+                        className={"px-2 py-0.5 text-xs transition-colors " +
+                          (terminalView === "checks" ? "bg-[#8b5cf6] text-white" : "text-[#888896] hover:text-white")}>
+                        ✓ Checks
+                      </button>
+                    )}
                     <button onClick={() => setTerminalView("path")}
                       className={"px-2 py-0.5 text-xs transition-colors " +
                         (terminalView === "path" ? "bg-[#8b5cf6] text-white" : "text-[#888896] hover:text-white")}>
@@ -2452,7 +2824,10 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
                 <Copy className="w-3 h-3" /> Copy
               </button>
             </div>
-            {terminalView === "score" && (selected === "timing" || selected === "drc")
+            {terminalView === "checks" && stageChecks[selected]
+              ? <ChecksPanel data={stageChecks[selected]}
+                  onOpenFix={(check) => setFixDialog({ stageId: selected, check })} />
+              : terminalView === "score" && (selected === "timing" || selected === "drc")
               ? <DesignScorecard outputs={outputs} configs={configs} runId={runId} />
               : terminalView === "chat"
               ? <PDChatAssistant runId={runId} configs={configs} verilogFiles={verilogFiles} outputs={outputs} stages={stages} />
@@ -2503,28 +2878,175 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
               </div>
             )}
 
-            {currentStage.status === "complete" && (
-              <div className="bg-green-900 bg-opacity-20 border border-green-800 rounded-lg p-3">
-                <p className="text-xs font-semibold text-green-400 mb-1">Complete ✓</p>
-                <p className="text-xs text-green-300 mb-1">Output saved. Proceed to next stage or download.</p>
-                <QoRAdvisor logs={outputs[selected] || []} stage={currentStage.name} runId={runId} config={configs[selected]} verilogFiles={verilogFiles} outputs={outputs} />
-              {selected === "timing" && (
-                <TimingClosureAdvisor
-                  logs={outputs["timing"] || []}
-                  runId={runId}
-                  configs={configs}
-                  setConfigs={setConfigs}
-                  verilogFiles={verilogFiles}
-                  outputs={outputs}
-                  stages={stages}
-                  setSelected={setSelected}
-                  onRerunStages={runStageForFix}
-                />
-              )}
-              </div>
-            )}
+            {currentStage.status === "complete" && (() => {
+              const previewViews = {
+                placement: { view: "placement", label: "Placement Layout" },
+                routing:   { view: "routing",   label: "Routed Layout"    },
+                drc:       { view: "gds",        label: "Final GDS Layout" },
+              };
+              const pv = previewViews[selected];
+              return (
+                <div className="bg-green-900 bg-opacity-20 border border-green-800 rounded-lg p-3">
+                  <p className="text-xs font-semibold text-green-400 mb-1">Complete ✓</p>
+                  <p className="text-xs text-green-300 mb-2">Output saved. Proceed to next stage or download.</p>
+                  {pv && (
+                    <button
+                      onClick={() => setLayoutView(pv)}
+                      className="w-full mb-2 py-1.5 rounded text-xs font-semibold
+                        bg-gradient-to-r from-[#8b5cf6] to-[#6d28d9] text-white
+                        hover:from-[#a78bfa] hover:to-[#8b5cf6] transition-all flex items-center justify-center gap-1.5">
+                      🔬 View Layout
+                    </button>
+                  )}
+                  <QoRAdvisor logs={outputs[selected] || []} stage={currentStage.name} runId={runId} config={configs[selected]} verilogFiles={verilogFiles} outputs={outputs} />
+                {selected === "timing" && (
+                  <TimingClosureAdvisor
+                    logs={outputs["timing"] || []}
+                    runId={runId}
+                    configs={configs}
+                    setConfigs={setConfigs}
+                    verilogFiles={verilogFiles}
+                    outputs={outputs}
+                    stages={stages}
+                    setSelected={setSelected}
+                    onRerunStages={runStageForFix}
+                  />
+                )}
+                </div>
+              );
+            })()}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function LayoutViewer({ runId, view, label, onClose }) {
+  const [status,   setStatus]   = useState("loading");
+  const [imgUrl,   setImgUrl]   = useState(null);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [scale,    setScale]    = useState(1);
+  const [offset,   setOffset]   = useState({ x: 0, y: 0 });
+  const [dragging, setDragging] = useState(false);
+  const [dragStart,setDragStart]= useState({ x: 0, y: 0 });
+
+  useEffect(() => {
+    setStatus("loading");
+    setErrorMsg("");
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    const url = PD_API + "/preview/" + runId + "/" + view;
+    fetch(url)
+      .then(async r => {
+        if (!r.ok) {
+          let detail = "HTTP " + r.status;
+          try {
+            const json = await r.json();
+            detail = json.detail || detail;
+          } catch (_) {}
+          throw new Error(detail);
+        }
+        return r.blob();
+      })
+      .then(blob => {
+        setImgUrl(URL.createObjectURL(blob));
+        setStatus("ok");
+      })
+      .catch(err => {
+        console.error("Preview error:", err);
+        setErrorMsg(err.message);
+        setStatus("error");
+      });
+    return () => { if (imgUrl) URL.revokeObjectURL(imgUrl); };
+  }, [runId, view]);
+
+  const onWheel = (e) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 0.87;
+    setScale(s => Math.min(Math.max(s * factor, 0.1), 20));
+  };
+
+  const onMouseDown = (e) => {
+    setDragging(true);
+    setDragStart({ x: e.clientX - offset.x, y: e.clientY - offset.y });
+  };
+  const onMouseMove = (e) => {
+    if (!dragging) return;
+    setOffset({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
+  };
+  const onMouseUp = () => setDragging(false);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black bg-opacity-90 flex flex-col">
+      <div className="flex items-center justify-between px-5 py-3 border-b border-[#1e1e2e] shrink-0">
+        <div className="flex items-center gap-3">
+          <span className="text-sm font-semibold text-white">{label}</span>
+          <span className="text-xs text-[#888896]">{runId.slice(0, 8)}</span>
+          <span className="text-xs text-[#444460]">
+            scroll to zoom · drag to pan
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => { setScale(1); setOffset({ x: 0, y: 0 }); }}
+            className="px-2.5 py-1 rounded text-xs text-[#888896] hover:text-white border border-[#2a2a3a] hover:border-[#444460] transition-colors">
+            Reset
+          </button>
+          {imgUrl && (
+            <a href={imgUrl} download={view + "_preview.png"}
+              className="px-2.5 py-1 rounded text-xs bg-[#1e1e2e] text-[#888896] hover:text-white border border-[#2a2a3a] hover:border-[#444460] transition-colors">
+              Save PNG
+            </a>
+          )}
+          <button onClick={onClose}
+            className="px-2.5 py-1 rounded text-xs bg-[#8b5cf6] text-white hover:bg-[#a78bfa] transition-colors">
+            Close
+          </button>
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-hidden flex items-center justify-center relative"
+        onWheel={onWheel}
+        onMouseDown={onMouseDown}
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
+        style={{ cursor: dragging ? "grabbing" : "grab" }}>
+
+        {status === "loading" && (
+          <div className="flex flex-col items-center gap-3 text-[#888896]">
+            <Loader2 className="w-8 h-8 animate-spin text-[#8b5cf6]" />
+            <p className="text-sm">Generating layout preview…</p>
+            <p className="text-xs text-[#444460]">This may take 15–30 seconds</p>
+          </div>
+        )}
+
+        {status === "error" && (
+          <div className="flex flex-col items-center gap-2 text-[#888896] max-w-lg px-6 text-center">
+            <AlertCircle className="w-8 h-8 text-red-400 shrink-0" />
+            <p className="text-sm text-red-300">Preview generation failed</p>
+            {errorMsg && (
+              <p className="text-xs font-mono bg-[#12121a] border border-[#2a2a3a] rounded px-3 py-2 text-left w-full text-[#c0c0d0] whitespace-pre-wrap break-all">
+                {errorMsg}
+              </p>
+            )}
+          </div>
+        )}
+
+        {status === "ok" && imgUrl && (
+          <img
+            src={imgUrl}
+            alt={label + " layout preview"}
+            draggable={false}
+            style={{
+              transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
+              transformOrigin: "center center",
+              transition: dragging ? "none" : "transform 0.05s ease",
+              maxWidth: "none",
+              imageRendering: "pixelated",
+            }}
+          />
+        )}
       </div>
     </div>
   );

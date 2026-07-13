@@ -1100,26 +1100,88 @@ async def pd_assist(
     verilog  = payload.get("verilog", "")
     config   = payload.get("config", {})
 
+    # ── mode: check_explain ──────────────────────────────────────────────────
+    # The PD verification layer (pdtools/pd_verification.py) already computed
+    # the failing checks AND the fixes deterministically. The LLM's ONLY job
+    # here is a plain-English explanation — it never computes values.
+    if mode == "check_explain":
+        ce_checks   = [c for c in payload.get("checks", []) if isinstance(c, dict)][:10]
+        ce_fixes    = [f for f in payload.get("fixes", []) if isinstance(f, dict)][:5]
+        ce_guidance = str(payload.get("guidance") or "")[:600]
+
+        checks_str = "\n".join(
+            f"- [{str(c.get('status', '?')).upper()}] {c.get('label', '?')}: "
+            f"{c.get('value', '?')}{c.get('unit', '')} — {c.get('message', '')}"
+            for c in ce_checks) or "none"
+        fixes_str = "\n".join(
+            f"- {f.get('label', '?')} ({f.get('stage', '?')} → {f.get('field', '?')}): "
+            f"{f.get('current_value')} → {f.get('proposed_value')}\n"
+            f"  computed from: {f.get('context', '')}"
+            for f in ce_fixes) or "none"
+
+        ce_system = (
+            "You are an expert ASIC physical design engineer inside RTL Copilot, a no-code "
+            "visual ASIC tool. A deterministic verification layer already analyzed the failing "
+            "checks and ALREADY COMPUTED the fixes from first principles. Your only job is to "
+            "explain, in plain English, what failed and what the pre-computed fixes will do. "
+            "Do not suggest additional fixes or config values — fixes are already computed. "
+            "Do not modify, question, or recompute the proposed values. Never suggest bash "
+            "commands. Reference the actual numbers given. "
+            'Respond ONLY with JSON, no markdown fences: '
+            '{"explanation": "2-3 sentences explaining what failed and what the fixes will do"}'
+        )
+        ce_user = (
+            "Stage: " + stage + "\n\n"
+            "Failing checks:\n" + checks_str + "\n\n"
+            "Pre-computed fixes (already final — explain, don't change):\n" + fixes_str +
+            (("\n\nDeterministic guidance (no config fix available): " + ce_guidance) if ce_guidance else "") +
+            "\n\nReturn the JSON now."
+        )
+        try:
+            completion = _llm_pd.chat.completions.create(
+                model=_byok_model_pd,
+                messages=[
+                    {"role": "system", "content": ce_system},
+                    {"role": "user",   "content": ce_user},
+                ],
+                temperature=0.1,
+                max_tokens=250,
+            )
+            raw = completion.choices[0].message.content.strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
+            try:
+                parsed = json.loads(raw)
+                explanation = str(parsed.get("explanation", "")).strip() or raw
+            except Exception:
+                explanation = raw
+            # Same guard as the other modes — never leak shell/tcl blocks
+            explanation = re.sub(r"```[\s\S]*?```", "", explanation).strip()
+            return {"status": "ok", "explanation": explanation}
+        except Exception:
+            _tb.print_exc()
+            return {"status": "error",
+                    "explanation": "AI explanation unavailable — the computed fixes are still valid."}
+
     all_logs_str = payload.get("allLogs", "")
     all_logs     = all_logs_str.split("\n") if all_logs_str else logs
 
     full_log = "\n".join(all_logs)
 
-    wns_m     = _re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', full_log, _re.IGNORECASE)
-    tns_m     = _re.search(r'tns\s+(?:max\s+)?([\-\d\.]+)', full_log, _re.IGNORECASE)
-    slack_m   = _re.search(r'([\d\.]+)\s+slack \(MET\)', full_log)  
-    hold_m    = _re.search(r'([\d\.]+)\s+slack \(MET\).*?min', full_log, _re.DOTALL)
-    power_m   = _re.search(r'Total\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+([\d\.e\+\-]+)', full_log)
-    cells_m   = _re.search(r'(\d+)\s+138\.883\s+cells', full_log)  
-    cells_m2  = _re.search(r'Number of instances:\s+(\d+)', full_log)
-    util_m    = _re.search(r'Utilization:\s+([\d\.]+)', full_log)  
-    area_m    = _re.search(r'Chip area for top module.*?:\s+([\d\.]+)', full_log)
-    die_m     = _re.search(r'Die BBox:.*?\(\s*([\d\.]+)\s+([\d\.]+)\s*\).*?\(\s*([\d\.]+)\s+([\d\.]+)', full_log)
-    clk_net_m = _re.search(r'clock network delay \((propagated|ideal)\)', full_log)
+    wns_m     = re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', full_log, re.IGNORECASE)
+    tns_m     = re.search(r'tns\s+(?:max\s+)?([\-\d\.]+)', full_log, re.IGNORECASE)
+    slack_m   = re.search(r'([\d\.]+)\s+slack \(MET\)', full_log)  
+    hold_m    = re.search(r'([\d\.]+)\s+slack \(MET\).*?min', full_log, re.DOTALL)
+    power_m   = re.search(r'Total\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+([\d\.e\+\-]+)', full_log)
+    cells_m   = re.search(r'(\d+)\s+138\.883\s+cells', full_log)  
+    cells_m2  = re.search(r'Number of instances:\s+(\d+)', full_log)
+    util_m    = re.search(r'Utilization:\s+([\d\.]+)', full_log)  
+    area_m    = re.search(r'Chip area for top module.*?:\s+([\d\.]+)', full_log)
+    die_m     = re.search(r'Die BBox:.*?\(\s*([\d\.]+)\s+([\d\.]+)\s*\).*?\(\s*([\d\.]+)\s+([\d\.]+)', full_log)
+    clk_net_m = re.search(r'clock network delay \((propagated|ideal)\)', full_log)
 
-    viol_m    = _re.search(r'Number of violations\s*=\s*(\d+)', full_log)
+    viol_m    = re.search(r'Number of violations\s*=\s*(\d+)', full_log)
 
-    cts_buf_m = _re.search(r'Created\s+(\d+)\s+components', full_log)
+    cts_buf_m = re.search(r'Created\s+(\d+)\s+components', full_log)
 
     metrics = {
         "wns_ns":          wns_m.group(1)   if wns_m    else "unknown",
@@ -1253,7 +1315,7 @@ async def pd_assist(
             max_tokens=900,
         )
         reply = completion.choices[0].message.content.strip()
-        reply = _re.sub(r"```(?:bash|shell|sh|tcl|openroad|python)?[\s\S]*?```", "[Use the RTL Copilot Config panel]", reply)
+        reply = re.sub(r"```(?:bash|shell|sh|tcl|openroad|python)?[\s\S]*?```", "[Use the RTL Copilot Config panel]", reply)
         if not _byok_pd:
             try:
                 auth_header = request.headers.get("Authorization", "")
@@ -1277,7 +1339,6 @@ async def pd_timing_fix(
     payload: dict,
 ):
     """Analyzes timing failures and returns a structured fix plan. Deducts 1 credit."""
-    import re as _re
     _byok_key_ptf, _provider_ptf, _model_ptf = _extract_user_api_key(request)
     _byok_ptf = bool(_byok_key_ptf)
     _llm_ptf, _byok_model_ptf = _get_llm_client(_byok_key_ptf, _provider_ptf, _model_ptf)
@@ -1286,14 +1347,14 @@ async def pd_timing_fix(
     configs      = payload.get("configs", {})
     verilog      = str(payload.get("verilog", ""))[:600]
 
-    wns_m    = _re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, _re.IGNORECASE)
-    tns_m    = _re.search(r'tns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, _re.IGNORECASE)
-    slack_m  = _re.search(r'([\-\d\.]+)\s+slack \((MET|VIOLATED)\)', all_logs_str)
-    hold_m   = _re.search(r'([\-\d\.]+)\s+slack \(VIOLATED\).*?min', all_logs_str, _re.DOTALL)
-    cells_m  = _re.search(r'(\d+)\s+138\.\d+\s+cells', all_logs_str)
-    util_m   = _re.search(r'Utilization:\s+([\d\.]+)', all_logs_str)
+    wns_m    = re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, re.IGNORECASE)
+    tns_m    = re.search(r'tns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, re.IGNORECASE)
+    slack_m  = re.search(r'([\-\d\.]+)\s+slack \((MET|VIOLATED)\)', all_logs_str)
+    hold_m   = re.search(r'([\-\d\.]+)\s+slack \(VIOLATED\).*?min', all_logs_str, re.DOTALL)
+    cells_m  = re.search(r'(\d+)\s+138\.\d+\s+cells', all_logs_str)
+    util_m   = re.search(r'Utilization:\s+([\d\.]+)', all_logs_str)
 
-    path_cells = _re.findall(r'\+[\d\.]+ns\s+\S+\s+\(sky130_fd_sc_hd__(\w+)\)', all_logs_str)
+    path_cells = re.findall(r'\+[\d\.]+ns\s+\S+\s+\(sky130_fd_sc_hd__(\w+)\)', all_logs_str)
     comb_depth = len([c for c in path_cells if 'dfxtp' not in c and 'dfrtp' not in c])
 
     wns       = float(wns_m.group(1))   if wns_m    else None
@@ -1473,12 +1534,11 @@ async def pd_chat(
     completed       = payload.get("completedStages", [])
     configs         = payload.get("configs", {})
 
-    import re as _re
-    wns_m   = _re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, _re.IGNORECASE)
-    slack_m = _re.search(r'([\d\.]+)\s+slack \(MET\)', all_logs_str)
-    power_m = _re.search(r'Total\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+([\d\.e\+\-]+)', all_logs_str)
-    util_m  = _re.search(r'Utilization:\s+([\d\.]+)', all_logs_str)
-    cells_m = _re.search(r'(\d+)\s+138\.\d+\s+cells', all_logs_str)
+    wns_m   = re.search(r'wns\s+(?:max\s+)?([\-\d\.]+)', all_logs_str, re.IGNORECASE)
+    slack_m = re.search(r'([\d\.]+)\s+slack \(MET\)', all_logs_str)
+    power_m = re.search(r'Total\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+[\d\.e\+\-]+\s+([\d\.e\+\-]+)', all_logs_str)
+    util_m  = re.search(r'Utilization:\s+([\d\.]+)', all_logs_str)
+    cells_m = re.search(r'(\d+)\s+138\.\d+\s+cells', all_logs_str)
 
     metrics_summary = (
         "WNS: " + (wns_m.group(1) + "ns" if wns_m else "unknown") + " | "
@@ -2156,7 +2216,7 @@ async def simulate_design(payload: SimulateRequest):
                 return {"status":"error","error":"Compilation failed","details":cr.stderr}
 
             sr = subprocess.run(["vvp", str(p/"sim")],
-                                 capture_output=True, text=True, cwd=str(p), timeout=30)
+                                 capture_output=True, text=True, cwd=str(p), timeout=10)
             if sr.returncode != 0:
                 return {"status":"error","error":"Simulation failed","details":sr.stderr}
 
@@ -6922,7 +6982,7 @@ async def _iverilog_compile_check(verilog_files: dict) -> tuple[bool, str]:
             dfiles = [str(p / f) for f in verilog_files]
             result = subprocess.run(
                 ["iverilog", "-tnull", "-s", "top"] + dfiles,
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=15
             )
             if result.returncode == 0:
                 return True, ""

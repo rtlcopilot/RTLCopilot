@@ -1,0 +1,37 @@
+{
+  "_doc": "PD verification policy — the single source of truth for every numeric constant used by pd_verification.py. Nothing numeric is hardcoded in the Python. Override precedence (lowest to highest): this shipped file → a copy placed at /work/verification_policy.json (the ./work volume mount, editable on the host without rebuilding the container; path overridable via PDV_POLICY_FILE) → environment variables named PDV_<KEY> (e.g. PDV_MAX_CONGESTION_ITERATIONS=80). Keys starting with '_' are documentation and are ignored by the loader.",
+
+  "_doc_die_density_limit_pct": "Step 1 of the routing-DRC diagnosis: if synthesis chip area / die area exceeds this percentage, the die is the root cause and everything else is skipped.",
+  "die_density_limit_pct": 8.0,
+
+  "_doc_die_density_target": "When resizing the die, target this cell-density fraction: target_side = ceil(sqrt(chip_area / die_density_target) * die_margin_factor).",
+  "die_density_target": 0.04,
+  "die_margin_factor": 1.1,
+
+  "_doc_congestion": "Shorts-dominant escalation: bump congestion_iterations by congestion_iteration_step, capped at max_congestion_iterations, before ever touching placement.",
+  "max_congestion_iterations": 60,
+  "congestion_iteration_step": 20,
+
+  "_doc_density": "Next escalation: reduce placement density by density_step, never below density_floor.",
+  "density_step": 0.05,
+  "density_floor": 0.3,
+
+  "_doc_wns_clock_margin": "Setup-WNS fix: proposed_clock = clock_period + |wns| * wns_clock_margin.",
+  "wns_clock_margin": 1.2,
+
+  "_doc_violation_dominance_fraction": "A violation category (Short / Metal Spacing) 'dominates' when it exceeds this fraction of all typed violations.",
+  "violation_dominance_fraction": 0.5,
+
+  "_doc_util_warning_fraction": "Utilization check turns 'warning' above util_warning_fraction * the user's max_util_pct threshold (still 'ok' below it, 'error' above the threshold itself).",
+  "util_warning_fraction": 0.9,
+
+  "_doc_default_clock_period_ns": "Fallback clock period used in fix arithmetic when run_meta.json predates clock_period_ns being recorded.",
+  "default_clock_period_ns": 10.0,
+
+  "_doc_overflow_fraction_detect_max": "Log-parsing unit detection: gpl reports overflow as a 0-1 fraction; values at or below this bound are converted to percent.",
+  "overflow_fraction_detect_max": 1.5,
+
+  "_doc_rounding": "Decimal places for proposed config values (these end up in the user's config, so their precision is policy too).",
+  "density_round_digits": 2,
+  "clock_period_round_digits": 3
+}

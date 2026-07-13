@@ -7,5 +7,7 @@ services:
     ports:
       - "7070:7070"
     volumes:
-      - ./work:/work        # mount local ./work folder into container
+      - ./work:/work
+      - ./api.py:/app/api.py
+      - ./pd_verification.py:/app/pd_verification.py
     restart: unless-stopped

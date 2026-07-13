@@ -1,8 +1,6 @@
 const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
-
-// ─── Config ───────────────────────────────────────────────────────────────────
 const IS_DEV = !app.isPackaged || process.argv.includes("--dev");
 const BACKEND_PORT = 8080;
 const FRONTEND_PORT = 5173;
@@ -15,7 +13,6 @@ let mainWindow = null;
 let backendProcess = null;
 let pdContainerRunning = false;
 
-// ─── RTL Backend launcher ─────────────────────────────────────────────────────
 function startBackend() {
   const projectRoot = path.resolve(__dirname, "..", "..");
   const backendDir = IS_DEV
@@ -80,11 +77,7 @@ function stopBackend() {
   }
 }
 
-// ─── Docker / PD helpers ──────────────────────────────────────────────────────
-
-// Returns { installed: bool, running: bool }
 function checkDockerStatus() {
-  // Check if docker binary exists — shell:true ensures Windows PATH is resolved correctly
   const which = spawnSync(
     process.platform === "win32" ? "where" : "which",
     ["docker"],
@@ -94,15 +87,13 @@ function checkDockerStatus() {
     return { installed: false, running: false };
   }
 
-  // docker version is more reliable than docker info on Windows named pipe
-  // shell:true ensures Docker Desktop PATH additions are picked up
+
   const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
     timeout: 8000, windowsHide: true, shell: true,
   });
   return { installed: true, running: version.status === 0 };
 }
 
-// Check if image exists locally
 function imageExistsLocally() {
   const result = spawnSync("docker", ["image", "inspect", PD_IMAGE], {
     timeout: 5000, windowsHide: true, shell: true,
@@ -110,7 +101,6 @@ function imageExistsLocally() {
   return result.status === 0;
 }
 
-// Pull image — streams progress lines back via callback
 function pullImage(onData) {
   return new Promise((resolve, reject) => {
     const proc = spawn("docker", ["pull", PD_IMAGE], { windowsHide: true, shell: true });
@@ -123,15 +113,12 @@ function pullImage(onData) {
   });
 }
 
-// Start the PD container
 function startPDContainer() {
   return new Promise((resolve, reject) => {
-    // Stop any existing container with the same name first
     spawnSync("docker", ["rm", "-f", PD_CONTAINER_NAME], {
       timeout: 5000, windowsHide: true, shell: true,
     });
 
-    // Ensure work directory exists
     const fs = require("fs");
     if (!fs.existsSync(PD_WORK_DIR)) fs.mkdirSync(PD_WORK_DIR, { recursive: true });
 
@@ -140,6 +127,10 @@ function startPDContainer() {
       "--name", PD_CONTAINER_NAME,
       "-p", `${PD_PORT}:7070`,
       "-v", `${PD_WORK_DIR}:/work`,
+      "-v", `D:\\RTLCopilot\\pdtools\\api.py:/app/api.py`,
+      "-v", `D:\\RTLCopilot\\pdtools\\pd_verification.py:/app/pd_verification.py`,
+      "-v", `D:\\RTLCopilot\\pdtools\\verification_policy.json:/app/verification_policy.json`,
+      "-v", `D:\\RTLCopilot\\pdtools\\export_preview.py:/app/export_preview.py`,
       PD_IMAGE,
     ], { windowsHide: true, shell: true });
 
@@ -157,7 +148,6 @@ function startPDContainer() {
   });
 }
 
-// Stop the PD container
 function stopPDContainer() {
   if (!pdContainerRunning) return;
   spawnSync("docker", ["stop", PD_CONTAINER_NAME], {
@@ -167,7 +157,6 @@ function stopPDContainer() {
   console.log("[pd] container stopped");
 }
 
-// Wait for PD container /health to respond
 function waitForPDContainer(retries = 30) {
   return new Promise((resolve) => {
     const http = require("http");
@@ -189,7 +178,6 @@ function waitForPDContainer(retries = 30) {
   });
 }
 
-// ─── Window creator ───────────────────────────────────────────────────────────
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -218,7 +206,6 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
-// ─── Wait for RTL backend ─────────────────────────────────────────────────────
 function waitForBackend(retries = 20) {
   return new Promise((resolve) => {
     const http = require("http");
@@ -240,26 +227,24 @@ function waitForBackend(retries = 20) {
   });
 }
 
-// ─── IPC handlers ─────────────────────────────────────────────────────────────
 ipcMain.handle("get-app-version", () => app.getVersion());
 ipcMain.handle("get-backend-port", () => BACKEND_PORT);
 ipcMain.handle("is-desktop", () => true);
 ipcMain.handle("open-external", (_, url) => shell.openExternal(url));
 
-// Check if Docker is installed and daemon is running
+
 ipcMain.handle("pd-check-docker", () => {
   return checkDockerStatus();
 });
 
-// Start PD container — pull if needed, then run
-// Streams pull progress back to renderer via event
+
 ipcMain.handle("pd-start", async (event) => {
   try {
     const { installed, running } = checkDockerStatus();
     if (!installed) return { ok: false, error: "Docker not installed" };
     if (!running)   return { ok: false, error: "Docker daemon not running" };
 
-    // Pull if image not local
+
     if (!imageExistsLocally()) {
       event.sender.send("pd-pull-progress", "[INFO] Pulling rtlcopilot/pd-tools image (first time only, ~2GB)...\n");
       await pullImage((line) => event.sender.send("pd-pull-progress", line));
@@ -277,13 +262,12 @@ ipcMain.handle("pd-start", async (event) => {
   }
 });
 
-// Stop PD container
+
 ipcMain.handle("pd-stop", () => {
   stopPDContainer();
   return { ok: true };
 });
 
-// ─── App lifecycle ────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   startBackend();
   await new Promise((r) => setTimeout(r, 1500));
