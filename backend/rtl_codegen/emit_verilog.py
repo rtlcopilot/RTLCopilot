@@ -21,6 +21,9 @@ cli usage:
   → prints JSON: { "files": {"top.v": "...", ...} }
 """
 
+import sys as _sys, os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+import port_contract as _pc
 import json
 import sys
 import math
@@ -350,6 +353,34 @@ def emit_verilog(ir: dict) -> dict:
             nid  = name_map[oid]
             ntyp = n["type"]
             w    = n.get("width", 8)
+
+            # A comb node's `width` is its OPERAND width. The wire it drives is
+            # the OUTPUT width, which the op decides: comparisons are 1 bit,
+            # mul is double, everything else matches the operands. Using the
+            # node width directly declared `wire eq_result` as 8 bits wide, or
+            # (when the node width was shrunk to match) made the operands 1 bit.
+            if ntyp == "splitter":
+                _bi = str(n.get("bitIndex",
+                          n.get("data", {}).get("bitIndex", "0"))).strip()
+                if ":" in _bi:
+                    try:
+                        _hi, _lo = (int(x) for x in _bi.split(":", 1))
+                        w = abs(_hi - _lo) + 1
+                    except (TypeError, ValueError):
+                        w = 1
+                else:
+                    w = 1
+
+            if ntyp == "comb":
+                try:
+                    _ow = _pc.resolve_width(
+                        "comb", "out", direction="outputs",
+                        data_width=int(str(w or 8)),
+                        comb_op=n.get("op") or n.get("data", {}).get("op"))
+                    if _ow:
+                        w = _ow
+                except Exception:
+                    pass
 
             if "__" in oid and (ntyp in ("const", "output") or
                                   n.get("isFsmOutput") or

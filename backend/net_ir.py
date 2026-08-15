@@ -1,4 +1,19 @@
+"""
+net_ir.py
+=========
+Canonical Net IR — sits between compileIR() output and emit_verilog.py.
 
+Converts the raw {src, dst, src_port, dst_port} edge graph into a
+structured net model with explicit driver/consumer ownership, widths,
+and signal domains.
+
+Works correctly for all three user types:
+  User 1 — manual circuits: no __ nodes, clean edges
+  User 2 — AI-generated:   __ placeholder nodes, isFsmOutput proxies
+  User 3 — hybrid:         mix of both
+
+The net model is the single source of truth for Verilog emission.
+"""
 
 from __future__ import annotations
 from typing import Any
