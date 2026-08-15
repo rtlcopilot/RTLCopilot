@@ -1,24 +1,4 @@
-"""
-test_known_circuits.py
-======================
-Automated regression suite for RTLCopilot known circuits.
 
-Runs every circuit in _KNOWN_HIERARCHIES through the full v2 pipeline
-(same path as a real AI build, but without a server or HTTP request),
-validates the Verilog output at multiple levels, and reports pass/fail.
-
-Usage:
-    cd D:\\RTLCopilot\\backend
-    python test_known_circuits.py
-
-    # Test specific circuits only:
-    python test_known_circuits.py uart_tx spi_master
-
-    # Verbose mode (print full Verilog on failure):
-    python test_known_circuits.py --verbose
-
-Exit code: 0 = all passed, 1 = any failed
-"""
 
 import asyncio
 import json

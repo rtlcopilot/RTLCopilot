@@ -1,28 +1,3 @@
-"""
-known_circuits.py
-=================
-Canonical hardware architecture templates for RTLCopilot.
-
-Each entry defines the exact sub-circuits, signal names, widths,
-and FSM transition tables. The LLM never invents topology for
-known circuits — it only fills in parameters.
-
-Schema layers per circuit (fully specified for uart_tx, others TBD):
-  Layer 0 — description, sub_circuits, top_level_inputs/outputs  (block diagram)
-  Layer 1 — signal_list       (every signal, driver, consumers, reset value)
-  Layer 2 — output_logic      (combinational output muxing — e.g. UART tx_out)
-  Layer 3 — reset             (polarity and type — enforced across all submodules)
-  Layer 4 — timing            (per-state control actions — counter resets, enables)
-
-Import in api_final.py:
-    from known_circuits import (
-        _KNOWN_HIERARCHIES,
-        _FSM_TRANSITION_TABLES,
-        _CIRCUIT_KEYWORDS,
-        PRIMITIVE_BLOCK_SPECS,
-    )
-"""
-
 
 _CIRCUIT_KEYWORDS: dict[str, list[str]] = {
 
@@ -1090,7 +1065,8 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
             {
                 "id": "duty_cmp", "name": "duty_cmp", "pattern": "comb",
                 "role": "Compares counter to duty cycle threshold",
-                "data": {"op": "lt", "width": "1"},
+                # width is the OPERAND width; the 1-bit result comes from op=lt
+                "data": {"op": "lt", "width": "8"},
                 "imports": [
                     {"signal": "in0", "handle": "in0", "width": "8",
                      "from": "period_counter", "src_handle": "count"},
@@ -1511,6 +1487,235 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
             {"name": "bus_req",  "width": "1",  "from": "dma_fsm",  "src_signal": "bus_req"},
             {"name": "dma_done", "width": "1",  "from": "dma_fsm",  "src_signal": "dma_done"},
             {"name": "dst_data", "width": "32", "from": "dma_fifo", "src_handle": "dout"},
+        ],
+        "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
+    },
+
+    "alu": {
+        "description": "8-bit ALU — 8 operations, 3-bit opcode, registered result + zero flag",
+
+        "sub_circuits": [
+            # ── operation units (all 8-bit in, 8-bit out) ──
+            {"id": "op_add", "name": "op_add", "pattern": "comb", "comb_op": "add",
+             "role": "a + b",
+             "data": {"width": "8", "op": "add"},
+             "exports": [{"signal": "add_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 60}},
+
+            {"id": "op_sub", "name": "op_sub", "pattern": "comb", "comb_op": "sub",
+             "role": "a - b",
+             "data": {"width": "8", "op": "sub"},
+             "exports": [{"signal": "sub_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 170}},
+
+            {"id": "op_and", "name": "op_and", "pattern": "comb", "comb_op": "and",
+             "role": "a & b — bitwise, full 8 bits wide",
+             "data": {"width": "8", "op": "and"},
+             "exports": [{"signal": "and_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 280}},
+
+            {"id": "op_or", "name": "op_or", "pattern": "comb", "comb_op": "or",
+             "role": "a | b — bitwise, full 8 bits wide",
+             "data": {"width": "8", "op": "or"},
+             "exports": [{"signal": "or_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 390}},
+
+            {"id": "op_xor", "name": "op_xor", "pattern": "comb", "comb_op": "xor",
+             "role": "a ^ b — bitwise, full 8 bits wide",
+             "data": {"width": "8", "op": "xor"},
+             "exports": [{"signal": "xor_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 500}},
+
+            {"id": "op_not", "name": "op_not", "pattern": "comb", "comb_op": "not",
+             "role": "~a — unary, only in0 is wired",
+             "data": {"width": "8", "op": "not"},
+             "exports": [{"signal": "not_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+             ],
+             "position": {"x": 350, "y": 610}},
+
+            {"id": "shift_amt", "name": "shift_amt", "pattern": "splitter",
+             "role": "b[2:0] — shift amount for an 8-bit datapath",
+             "data": {"width": "3", "bitIndex": "2:0"},
+             "exports": [{"signal": "sh_amt", "handle": "out", "width": "3"}],
+             "imports": [{"signal": "in", "handle": "in", "width": "8",
+                          "from": "external"}],
+             "position": {"x": 180, "y": 775}},
+
+            {"id": "op_shl", "name": "op_shl", "pattern": "comb", "comb_op": "shl",
+             "role": "a << b[2:0]",
+             "data": {"width": "8", "op": "shl"},
+             "exports": [{"signal": "shl_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8",
+                  "from": "shift_amt", "src_handle": "out"},
+             ],
+             "position": {"x": 350, "y": 720}},
+
+            {"id": "op_shr", "name": "op_shr", "pattern": "comb", "comb_op": "shr",
+             "role": "a >> b[2:0]",
+             "data": {"width": "8", "op": "shr"},
+             "exports": [{"signal": "shr_r", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8", "from": "external"},
+                 {"signal": "in1", "handle": "in1", "width": "8",
+                  "from": "shift_amt", "src_handle": "out"},
+             ],
+             "position": {"x": 350, "y": 830}},
+
+            # ── opcode bit slicing: one 1-bit select handle per mux sel bit ──
+            {"id": "op_bit0", "name": "op_bit0", "pattern": "splitter",
+             "role": "opcode bit 0 -> result_mux.sel0",
+             # width is the SLICE width (1 bit), not the source width
+             "data": {"width": "1", "bitIndex": "0"},
+             "exports": [{"signal": "sel0", "handle": "out", "width": "1"}],
+             "imports": [{"signal": "in", "handle": "in", "width": "3",
+                          "from": "external"}],
+             "position": {"x": 350, "y": 940}},
+
+            {"id": "op_bit1", "name": "op_bit1", "pattern": "splitter",
+             "role": "opcode bit 1 -> result_mux.sel1",
+             # width is the SLICE width (1 bit), not the source width
+             "data": {"width": "1", "bitIndex": "1"},
+             "exports": [{"signal": "sel1", "handle": "out", "width": "1"}],
+             "imports": [{"signal": "in", "handle": "in", "width": "3",
+                          "from": "external"}],
+             "position": {"x": 350, "y": 1010}},
+
+            {"id": "op_bit2", "name": "op_bit2", "pattern": "splitter",
+             "role": "opcode bit 2 -> result_mux.sel2",
+             # width is the SLICE width (1 bit), not the source width
+             "data": {"width": "1", "bitIndex": "2"},
+             "exports": [{"signal": "sel2", "handle": "out", "width": "1"}],
+             "imports": [{"signal": "in", "handle": "in", "width": "3",
+                          "from": "external"}],
+             "position": {"x": 350, "y": 1080}},
+
+            # ── 8:1 result select ──
+            {"id": "result_mux", "name": "result_mux", "pattern": "mux",
+             "role": "Selects one operation result using the 3-bit opcode",
+             "data": {"width": "8", "muxSize": "8"},
+             "exports": [{"signal": "alu_result", "handle": "out", "width": "8"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8",
+                  "from": "op_add", "src_handle": "out"},
+                 {"signal": "in1", "handle": "in1", "width": "8",
+                  "from": "op_sub", "src_handle": "out"},
+                 {"signal": "in2", "handle": "in2", "width": "8",
+                  "from": "op_and", "src_handle": "out"},
+                 {"signal": "in3", "handle": "in3", "width": "8",
+                  "from": "op_or",  "src_handle": "out"},
+                 {"signal": "in4", "handle": "in4", "width": "8",
+                  "from": "op_xor", "src_handle": "out"},
+                 {"signal": "in5", "handle": "in5", "width": "8",
+                  "from": "op_not", "src_handle": "out"},
+                 {"signal": "in6", "handle": "in6", "width": "8",
+                  "from": "op_shl", "src_handle": "out"},
+                 {"signal": "in7", "handle": "in7", "width": "8",
+                  "from": "op_shr", "src_handle": "out"},
+                 {"signal": "sel0", "handle": "sel0", "width": "1",
+                  "from": "op_bit0", "src_handle": "out"},
+                 {"signal": "sel1", "handle": "sel1", "width": "1",
+                  "from": "op_bit1", "src_handle": "out"},
+                 {"signal": "sel2", "handle": "sel2", "width": "1",
+                  "from": "op_bit2", "src_handle": "out"},
+             ],
+             "position": {"x": 750, "y": 400}},
+
+            # ── registered result ──
+            {"id": "result_reg", "name": "result_reg", "pattern": "reg",
+             "role": "Registers the selected result — gives the design a clock",
+             "data": {"width": "8"},
+             "exports": [{"signal": "result_q", "handle": "q", "width": "8"}],
+             "imports": [
+                 {"signal": "d", "handle": "d", "width": "8",
+                  "from": "result_mux", "src_handle": "out"},
+             ],
+             "position": {"x": 1100, "y": 400}},
+
+            # ── zero flag: predicate output is genuinely 1 bit ──
+            # ── flags ──
+            {"id": "sign_bit", "name": "sign_bit", "pattern": "splitter",
+             "role": "negative flag — MSB of the registered result",
+             "data": {"width": "1", "bitIndex": "7"},
+             "exports": [{"signal": "neg_f", "handle": "out", "width": "1"}],
+             "imports": [{"signal": "in", "handle": "in", "width": "8",
+                          "from": "result_reg", "src_handle": "q"}],
+             "position": {"x": 1450, "y": 300}},
+
+            {"id": "zero_const", "name": "zero_const", "pattern": "const",
+             "role": "constant 0 for the zero-flag comparison",
+             "data": {"width": "8", "value": "0"},
+             "exports": [{"signal": "const_zero", "handle": "out", "width": "8"}],
+             "imports": [],
+             "position": {"x": 1100, "y": 700}},
+
+            {"id": "zero_det", "name": "zero_det", "pattern": "comb", "comb_op": "eq",
+             "role": "zero flag — registered result == 0",
+             # width is the OPERAND width; the 1-bit result comes from op=eq
+             "data": {"width": "8", "op": "eq"},
+             "exports": [{"signal": "zero_f", "handle": "out", "width": "1"}],
+             "imports": [
+                 {"signal": "in0", "handle": "in0", "width": "8",
+                  "from": "result_reg", "src_handle": "q"},
+                 {"signal": "in1", "handle": "in1", "width": "8",
+                  "from": "zero_const", "src_handle": "out"},
+             ],
+             "position": {"x": 1450, "y": 560}},
+        ],
+
+        "top_level_inputs": [
+            # `a` feeds in0 of every operation unit; `b` feeds in1 of the binary
+            # ones (op_not is unary and takes only `a`). One entry per
+            # destination — this list is routes, not port declarations.
+            {"name": "a",  "width": "8", "to": "op_add", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_sub", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_and", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_or",  "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_xor", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_not", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_shl", "dst_handle": "in0"},
+            {"name": "a",  "width": "8", "to": "op_shr", "dst_handle": "in0"},
+            {"name": "b",  "width": "8", "to": "op_add", "dst_handle": "in1"},
+            {"name": "b",  "width": "8", "to": "op_sub", "dst_handle": "in1"},
+            {"name": "b",  "width": "8", "to": "op_and", "dst_handle": "in1"},
+            {"name": "b",  "width": "8", "to": "op_or",  "dst_handle": "in1"},
+            {"name": "b",  "width": "8", "to": "op_xor", "dst_handle": "in1"},
+            {"name": "b",  "width": "8", "to": "shift_amt", "dst_handle": "in"},
+            # the opcode drives all three bit splitters
+            {"name": "op", "width": "3", "to": "op_bit0", "dst_handle": "in"},
+            {"name": "op", "width": "3", "to": "op_bit1", "dst_handle": "in"},
+            {"name": "op", "width": "3", "to": "op_bit2", "dst_handle": "in"},
+        ],
+        "top_level_outputs": [
+            {"name": "result", "width": "8", "from": "result_reg",
+             "src_handle": "q"},
+            {"name": "zero",   "width": "1", "from": "zero_det",
+             "src_handle": "out"},
+            {"name": "negative", "width": "1", "from": "sign_bit",
+             "src_handle": "out"},
         ],
         "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
     },

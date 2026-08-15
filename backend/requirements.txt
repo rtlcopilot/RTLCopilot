@@ -5,3 +5,4 @@ supabase
 python-dotenv
 openai
 httpx
+razorpay

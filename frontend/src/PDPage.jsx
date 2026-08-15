@@ -98,7 +98,7 @@ async function callPDAssist({ mode, stage, logs, runId, config, verilogFiles, ou
   return data.reply;
 }
 
-// PD verification 
+// ── PD verification layer (checks + deterministic fixes) ─────────────────────
 
 const CHECKED_STAGES = ["synthesis", "placement", "cts", "routing"];
 
@@ -177,7 +177,7 @@ const STAGES = [
   { id: "placement", name: "Placement",        tool: "OpenROAD", outputFile: "placement.def", outputLabel: "Placement (.def)"   },
   { id: "cts",       name: "Clock Tree (CTS)", tool: "OpenROAD", outputFile: "cts.def",       outputLabel: "CTS DEF (.def)"     },
   { id: "routing",   name: "Routing",          tool: "OpenROAD", outputFile: "routed.def",    outputLabel: "Routed DEF (.def)"  },
-  { id: "spef",      name: "RC Extraction",    tool: "OpenROAD", outputFile: "output.spef",   outputLabel: "SPEF (.spef)"       },
+  { id: "spef",      name: "RC Extraction",    tool: "OpenROAD", outputFile: "routing.spef",  outputLabel: "SPEF (.spef)"       },
   { id: "timing",    name: "Timing Analysis",  tool: "OpenSTA",  outputFile: "timing.rpt",    outputLabel: "Timing Report"      },
   { id: "drc",       name: "DRC + GDS",        tool: "KLayout",  outputFile: "output.gds",    outputLabel: "GDS (.gds)"         },
 ];
@@ -185,47 +185,60 @@ const STAGES = [
 const DEFAULT_CONFIGS = {
   synthesis: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
-    clock_period_ns: 10, flatten: false,
+    clock_period_ns: 10, clock_port: "clk", flatten: false,
     abc_strategy: "balanced", opt_level: 2,
+    dont_use_cells: [],
   },
   floorplan: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
     die_area: "0 0 1000 1000", core_util: 0.45,
-    aspect_ratio: 1.0, core_margin_um: 10, pin_placement: "random",
+    aspect_ratio: 1.0, core_margin_um: 10,
+    io_constraints: {}, io_top: "", io_bottom: "", io_left: "", io_right: "",
   },
   placement: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
     density: 0.6, timing_driven: true,
-    congestion_driven: false, cell_padding: 4,
-    clock_port: "clk", clock_period_ns: 10,
+    congestion_driven: true, cell_padding: 4,
+    max_wire_length: 100, slew_margin: 0.05, cap_margin: 0.05,
+    setup_margin: 0.05, hold_margin: 0.05, max_repair_util: 80,
     // verification thresholds — empty = unchecked ("unset" status)
     wns_margin_ns: "", max_util_pct: "",
   },
   routing: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
     bottom_routing_layer: "met1", top_routing_layer: "met5",
+    clock_bottom_layer: "met4", clock_top_layer: "met5",
     congestion_iterations: 30, antenna_fixing: true,
+    antenna_diode_cell: "sky130_fd_sc_hd__diode_2",
+    clock_ndr_width_mult: 2, clock_ndr_space_mult: 2,
   },
   timing: {
-    cell_lib: "sky130_fd_sc_hd", corner: "tt",
+    cell_lib: "sky130_fd_sc_hd",
+    setup_corner: "ss", hold_corner: "ff",
     clock_period_ns: 10, clock_uncertainty_ns: 0.1,
     input_delay_frac: 0.2, output_delay_frac: 0.2, clock_port: "",
+    late_derate: 1.05, early_derate: 0.95, num_paths: 10,
   },
   pdn: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
     vdd_net: "VDD", vss_net: "VSS",
     straps_layer: "met4", straps_width: 1.6, straps_pitch: 27.1,
+    straps_layer2: "met5", straps_width2: 1.6, straps_pitch2: 27.1,
   },
   cts: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
-    clock_port: "clk", clock_period_ns: 10,
-    cts_buf_list: "sky130_fd_sc_hd__clkbuf_4 sky130_fd_sc_hd__clkbuf_8",
+    cts_root_buf: "sky130_fd_sc_hd__clkbuf_16",
+    cts_buf_list: "sky130_fd_sc_hd__clkbuf_2 sky130_fd_sc_hd__clkbuf_4 sky130_fd_sc_hd__clkbuf_8 sky130_fd_sc_hd__clkbuf_16",
     cts_max_slew: 0.4, cts_max_cap: 0.08,
+    sink_clustering_size: 25, sink_clustering_max_diameter: 50.0,
+    hold_margin: 0.1, max_repair_util: 80,
     // verification threshold — empty = unchecked ("unset" status)
     wns_margin_ns: "",
   },
   spef: {
     cell_lib: "sky130_fd_sc_hd", corner: "tt",
+    max_res: 50, coupling_threshold: 0.1,
+    spef_filename: "routing.spef",
   },
   drc: {},
 };
@@ -331,9 +344,41 @@ const TOOLTIPS = {
   max_util_pct: "Verification threshold: maximum acceptable core utilization in percent. The placement check fails when utilization exceeds this. Leave empty to skip this check.",
 
   clock_port_cts: "The clock input port name. CTS will build a balanced tree from this port to all flip-flop clock pins.",
-  cts_buf_list: "Clock buffer cells used to build the clock tree. clkbuf_4 and clkbuf_8 are standard choices. The number suffix indicates drive strength.",
+  cts_root_buf: "The buffer placed at the root of the clock tree, directly at the clock source. Must be the strongest available clock buffer since it drives the entire first level of the tree.",
+  cts_buf_list: "Clock buffer cells the CTS engine can choose from at internal tree nodes. Provide a range of drive strengths (2, 4, 8, 16) so the engine picks the weakest buffer that meets constraints at each node.",
   cts_max_slew: "Maximum allowed slew rate on clock nets in nanoseconds. Lower values produce sharper clock edges but require more buffers. 0.4ns is typical.",
   cts_max_cap: "Maximum capacitance per clock net segment in picofarads. Lower values force earlier buffer insertion for better signal integrity. 0.08pF is typical.",
+  sink_clustering_size: "Maximum flip-flops per leaf cluster. Each leaf buffer drives at most this many sinks. Too large means high capacitance per buffer; too small means more tree levels.",
+  sink_clustering_max_diameter: "Maximum geographic spread of a sink cluster in microns. Prevents large clusters whose internal wire delays would create within-cluster skew.",
+
+  dont_use_cells: "Space-separated list of cell names to exclude from synthesis. Useful for cells with known silicon bugs, cells that are too slow, or cells reserved for specific purposes.",
+  io_edge_pins: "Space-separated pin names (or patterns like data_in[*]) to place on this die edge, e.g.: clk rst_n. Leave all four empty for automatic pin spreading across all edges.",
+
+  max_wire_length: "Maximum wire length before the tool inserts a buffer to regenerate the signal (microns). Shorter limits improve timing but increase cell count. Typical: 75–150µm.",
+  slew_margin: "Extra margin on slew-rate constraints during placement repair (fraction). 0.05 = 5% margin beyond the library limit.",
+  cap_margin: "Extra margin on capacitance constraints during placement repair (fraction). 0.05 = 5% margin beyond the library limit.",
+  setup_margin_placement: "Positive slack target for setup timing repair during placement (ns). The tool repairs paths until this margin is met, providing buffer against post-route degradation.",
+  hold_margin_placement: "Positive slack target for hold timing repair during placement (ns). Hold violations must be fixed here before they compound during routing.",
+  max_repair_util: "Maximum utilisation the repair passes can push the design to when inserting buffers (%). Prevents repair from creating an unroutable design.",
+
+  clock_bottom_layer: "Lowest metal layer for clock routing. met4 is standard — upper metals have lower resistance, reducing clock tree insertion delay and skew.",
+  clock_top_layer: "Highest metal layer for clock routing. met5 with met4 gives a two-layer clock routing resource pool.",
+  antenna_diode_cell: "Library cell used for antenna repair. Must be a characterised antenna protection diode in the PDK. sky130_fd_sc_hd__diode_2 is the standard choice.",
+  clock_ndr_width_mult: "Width multiplier for Non-Default Routing Rules on clock nets. 2× width halves resistance, reducing insertion delay and skew.",
+  clock_ndr_space_mult: "Spacing multiplier for NDR on clock nets. 2× spacing reduces capacitive coupling from adjacent signal wires, improving clock signal integrity.",
+
+  straps_layer2: "Optional second power strap layer to create a true mesh PDN (horizontal + vertical). Reduces IR drop at the ends of met1 rails between strap crossings. Set empty to use a single-layer comb structure.",
+  straps_width2: "Width of the second-layer power straps in microns.",
+  straps_pitch2: "Pitch of the second-layer power straps in microns.",
+
+  setup_corner: "Liberty corner for setup timing sign-off. SS (slow-slow) is the worst case for setup — it uses the slowest cells at the highest temperature and lowest voltage. A design that passes here will pass in the field.",
+  hold_corner: "Liberty corner for hold timing sign-off. FF (fast-fast) is the worst case for hold — fast cells create short data paths that may violate the hold window. A design that passes here will pass in the field.",
+  late_derate: "OCV late-path derating factor (≥1.0). Applied to all paths during setup analysis to model within-die variation making paths slower than nominal. 1.05 = 5% pessimism.",
+  early_derate: "OCV early-path derating factor (≤1.0). Applied to all paths during hold analysis to model within-die variation making paths faster than nominal. 0.95 = 5% optimism.",
+  num_paths: "Number of worst timing paths to report per path group. Higher values give more diagnostic information but produce larger reports.",
+
+  max_res_spef: "Maximum wire resistance (Ω) before a segment is split into smaller segments for more accurate distributed RC modelling. Lower values produce larger SPEF files but more accurate timing.",
+  coupling_threshold: "Minimum coupling capacitance (fF) to include in the SPEF as a coupling element rather than folding it into grounded capacitance. Lower values improve crosstalk analysis accuracy.",
 };
 
 function Tooltip({ text }) {
@@ -383,6 +428,9 @@ function ConfigPanel({ stageId, config, onChange }) {
         <Field label="Clock Period (ns)" tip={TOOLTIPS.clock_period_ns_synth}>
           <Inp type="number" value={config.clock_period_ns} onChange={v => set("clock_period_ns", v)} min={1} max={200} step={0.5} />
         </Field>
+        <Field label="Clock Port" tip={TOOLTIPS.clock_port_synth}>
+          <Inp value={config.clock_port} onChange={v => set("clock_port", v)} />
+        </Field>
         <Field label="ABC Strategy" tip={TOOLTIPS.abc_strategy}>
           <Sel value={config.abc_strategy} onChange={v => set("abc_strategy", v)}
             options={["balanced","speed","area"]} />
@@ -392,6 +440,10 @@ function ConfigPanel({ stageId, config, onChange }) {
         </Field>
       </div>
       <Toggle value={config.flatten} onChange={v => set("flatten", v)} label="Flatten hierarchy before synthesis" />
+      <Field label="Don't-Use Cells (space-separated)" tip={TOOLTIPS.dont_use_cells}>
+        <Inp value={(config.dont_use_cells || []).join(" ")}
+          onChange={v => set("dont_use_cells", v.trim() ? v.trim().split(/\s+/) : [])} />
+      </Field>
     </div>
   );
 
@@ -412,6 +464,28 @@ function ConfigPanel({ stageId, config, onChange }) {
           <Inp type="number" value={config.core_margin_um} onChange={v => set("core_margin_um", v)} min={1} max={100} step={1} />
         </Field>
       </div>
+      <p className="text-xs text-[#888896] font-semibold uppercase tracking-wide pt-1">Pin Edges (optional)</p>
+      <div className="grid grid-cols-2 gap-3">
+        {["top", "bottom", "left", "right"].map(edge => (
+          <Field key={edge}
+            label={edge[0].toUpperCase() + edge.slice(1) + " edge pins"}
+            tip={TOOLTIPS.io_edge_pins}>
+            <Inp
+              value={config["io_" + edge] || ""}
+              onChange={v => {
+                const next = { ...config, ["io_" + edge]: v };
+                const io = {};
+                for (const e of ["top", "bottom", "left", "right"]) {
+                  for (const pat of (next["io_" + e] || "").trim().split(/\s+/)) {
+                    if (pat) io[pat] = e;
+                  }
+                }
+                onChange({ ...next, io_constraints: io });
+              }}
+            />
+          </Field>
+        ))}
+      </div>
     </div>
   );
 
@@ -430,16 +504,30 @@ function ConfigPanel({ stageId, config, onChange }) {
         <Toggle value={config.timing_driven}    onChange={v => set("timing_driven", v)}    label="Timing-driven placement" />
         <Toggle value={config.congestion_driven} onChange={v => set("congestion_driven", v)} label="Congestion-driven placement" />
       </div>
-      {config.timing_driven && (
-        <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
-          <Field label="Clock Port (for timing-driven)" tip={TOOLTIPS.clock_port_placement}>
-            <Inp value={config.clock_port} onChange={v => set("clock_port", v)} />
-          </Field>
-          <Field label="Clock Period (ns)">
-            <Inp type="number" value={config.clock_period_ns} onChange={v => set("clock_period_ns", v)} min={1} max={200} step={0.5} />
-          </Field>
-        </div>
-      )}
+      {/* Repair passes */}
+      <div className="grid grid-cols-3 gap-3 border-t border-[#2a2a3a] pt-3">
+        <Field label="Max Wire Length (µm)" tip={TOOLTIPS.max_wire_length}>
+          <Inp type="number" value={config.max_wire_length} onChange={v => set("max_wire_length", v)} min={10} max={500} step={10} />
+        </Field>
+        <Field label="Slew Margin" tip={TOOLTIPS.slew_margin}>
+          <Inp type="number" value={config.slew_margin} onChange={v => set("slew_margin", v)} min={0} max={0.5} step={0.01} />
+        </Field>
+        <Field label="Cap Margin" tip={TOOLTIPS.cap_margin}>
+          <Inp type="number" value={config.cap_margin} onChange={v => set("cap_margin", v)} min={0} max={0.5} step={0.01} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Setup Margin (ns)" tip={TOOLTIPS.setup_margin_placement}>
+          <Inp type="number" value={config.setup_margin} onChange={v => set("setup_margin", v)} min={0} max={1} step={0.01} />
+        </Field>
+        <Field label="Hold Margin (ns)" tip={TOOLTIPS.hold_margin_placement}>
+          <Inp type="number" value={config.hold_margin} onChange={v => set("hold_margin", v)} min={0} max={1} step={0.01} />
+        </Field>
+        <Field label="Max Repair Util (%)" tip={TOOLTIPS.max_repair_util}>
+          <Inp type="number" value={config.max_repair_util} onChange={v => set("max_repair_util", v)} min={50} max={95} step={1} />
+        </Field>
+      </div>
+      {/* Verification thresholds */}
       <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
         <Field label="✓ WNS Margin (ns)" tip={TOOLTIPS.wns_margin_ns}>
           <Inp type="number" value={config.wns_margin_ns ?? ""} onChange={v => set("wns_margin_ns", isNaN(v) ? "" : v)} min={0} max={10} step={0.1} />
@@ -454,6 +542,7 @@ function ConfigPanel({ stageId, config, onChange }) {
   if (stageId === "routing") return (
     <div className="space-y-3">
       <LibCorner />
+      <p className="text-xs text-[#888896] font-semibold uppercase tracking-wide">Signal Layers</p>
       <div className="grid grid-cols-3 gap-3">
         <Field label="Bottom Layer" tip={TOOLTIPS.bottom_routing_layer}>
           <Sel value={config.bottom_routing_layer} onChange={v => set("bottom_routing_layer", v)}
@@ -467,15 +556,55 @@ function ConfigPanel({ stageId, config, onChange }) {
           <Inp type="number" value={config.congestion_iterations} onChange={v => set("congestion_iterations", v)} min={5} max={100} step={5} />
         </Field>
       </div>
-      <Toggle value={config.antenna_fixing} onChange={v => set("antenna_fixing", v)} label="Enable antenna fixing" />
+      <p className="text-xs text-[#888896] font-semibold uppercase tracking-wide pt-1">Clock Layers (NDR)</p>
+      <div className="grid grid-cols-4 gap-3">
+        <Field label="Clock Bottom" tip={TOOLTIPS.clock_bottom_layer}>
+          <Sel value={config.clock_bottom_layer} onChange={v => set("clock_bottom_layer", v)}
+            options={["met3","met4","met5"]} />
+        </Field>
+        <Field label="Clock Top" tip={TOOLTIPS.clock_top_layer}>
+          <Sel value={config.clock_top_layer} onChange={v => set("clock_top_layer", v)}
+            options={["met4","met5"]} />
+        </Field>
+        <Field label="NDR Width ×" tip={TOOLTIPS.clock_ndr_width_mult}>
+          <Inp type="number" value={config.clock_ndr_width_mult} onChange={v => set("clock_ndr_width_mult", v)} min={1} max={4} step={1} />
+        </Field>
+        <Field label="NDR Space ×" tip={TOOLTIPS.clock_ndr_space_mult}>
+          <Inp type="number" value={config.clock_ndr_space_mult} onChange={v => set("clock_ndr_space_mult", v)} min={1} max={4} step={1} />
+        </Field>
+      </div>
+      <div className="flex gap-6 border-t border-[#2a2a3a] pt-3">
+        <Toggle value={config.antenna_fixing} onChange={v => set("antenna_fixing", v)} label="Enable antenna fixing" />
+      </div>
+      {config.antenna_fixing && (
+        <Field label="Antenna Diode Cell" tip={TOOLTIPS.antenna_diode_cell}>
+          <Inp value={config.antenna_diode_cell} onChange={v => set("antenna_diode_cell", v)} />
+        </Field>
+      )}
     </div>
   );
 
   if (stageId === "timing") return (
     <div className="space-y-3">
       <LibCorner />
+      {/* MMMC corners — note: LibCorner above is only used for cell_lib display.
+          The actual timing sign-off uses setup_corner and hold_corner below. */}
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Clock Period (ns)" tip={TOOLTIPS.clock_period_ns_synth}>
+        <Field label="Setup Corner (worst-case slow)" tip={TOOLTIPS.setup_corner}>
+          <Sel value={config.setup_corner} onChange={v => set("setup_corner", v)} options={[
+            { value: "ss", label: "SS — Slow 100°C 1.60V (sign-off)" },
+            { value: "tt", label: "TT — Typical 25°C 1.80V" },
+          ]} />
+        </Field>
+        <Field label="Hold Corner (worst-case fast)" tip={TOOLTIPS.hold_corner}>
+          <Sel value={config.hold_corner} onChange={v => set("hold_corner", v)} options={[
+            { value: "ff", label: "FF — Fast -40°C 1.95V (sign-off)" },
+            { value: "tt", label: "TT — Typical 25°C 1.80V" },
+          ]} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Clock Period (ns)" tip={TOOLTIPS.clock_period_ns_timing}>
           <Inp type="number" value={config.clock_period_ns} onChange={v => set("clock_period_ns", v)} min={1} max={200} step={0.5} />
         </Field>
         <Field label="Clock Uncertainty (ns)" tip={TOOLTIPS.clock_uncertainty_ns}>
@@ -493,6 +622,17 @@ function ConfigPanel({ stageId, config, onChange }) {
           <Inp type="number" value={config.output_delay_frac} onChange={v => set("output_delay_frac", v)} min={0} max={0.9} step={0.05} />
         </Field>
       </div>
+      <div className="grid grid-cols-3 gap-3 border-t border-[#2a2a3a] pt-3">
+        <Field label="Late Derate (OCV)" tip={TOOLTIPS.late_derate}>
+          <Inp type="number" value={config.late_derate} onChange={v => set("late_derate", v)} min={1.0} max={1.2} step={0.01} />
+        </Field>
+        <Field label="Early Derate (OCV)" tip={TOOLTIPS.early_derate}>
+          <Inp type="number" value={config.early_derate} onChange={v => set("early_derate", v)} min={0.8} max={1.0} step={0.01} />
+        </Field>
+        <Field label="Worst Paths to Report" tip={TOOLTIPS.num_paths}>
+          <Inp type="number" value={config.num_paths} onChange={v => set("num_paths", v)} min={1} max={100} step={1} />
+        </Field>
+      </div>
     </div>
   );
 
@@ -503,15 +643,32 @@ function ConfigPanel({ stageId, config, onChange }) {
         <Field label="VDD Net" tip={TOOLTIPS.vdd_net}><Inp value={config.vdd_net} onChange={v => set("vdd_net", v)} /></Field>
         <Field label="VSS Net" tip={TOOLTIPS.vss_net}><Inp value={config.vss_net} onChange={v => set("vss_net", v)} /></Field>
       </div>
+      <p className="text-xs text-[#888896] font-semibold uppercase tracking-wide pt-1">Primary Straps</p>
       <div className="grid grid-cols-3 gap-3">
-        <Field label="Straps Layer" tip={TOOLTIPS.straps_layer}>
+        <Field label="Layer" tip={TOOLTIPS.straps_layer}>
           <Sel value={config.straps_layer} onChange={v => set("straps_layer", v)} options={["met3","met4","met5"]} />
         </Field>
-        <Field label="Strap Width (µm)" tip={TOOLTIPS.straps_width}>
+        <Field label="Width (µm)" tip={TOOLTIPS.straps_width}>
           <Inp type="number" value={config.straps_width} onChange={v => set("straps_width", v)} min={0.5} max={5} step={0.1} />
         </Field>
-        <Field label="Strap Pitch (µm)" tip={TOOLTIPS.straps_pitch}>
+        <Field label="Pitch (µm)" tip={TOOLTIPS.straps_pitch}>
           <Inp type="number" value={config.straps_pitch} onChange={v => set("straps_pitch", v)} min={5} max={100} step={0.5} />
+        </Field>
+      </div>
+      <p className="text-xs text-[#888896] font-semibold uppercase tracking-wide pt-1">Second Strap Layer (Mesh)</p>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="Layer" tip={TOOLTIPS.straps_layer2}>
+          <Sel value={config.straps_layer2 || ""} onChange={v => set("straps_layer2", v)} options={[
+            { value: "", label: "Disabled (comb)" },
+            { value: "met4", label: "met4" },
+            { value: "met5", label: "met5" },
+          ]} />
+        </Field>
+        <Field label="Width (µm)" tip={TOOLTIPS.straps_width2}>
+          <Inp type="number" value={config.straps_width2} onChange={v => set("straps_width2", v)} min={0.5} max={5} step={0.1} />
+        </Field>
+        <Field label="Pitch (µm)" tip={TOOLTIPS.straps_pitch2}>
+          <Inp type="number" value={config.straps_pitch2} onChange={v => set("straps_pitch2", v)} min={5} max={100} step={0.5} />
         </Field>
       </div>
     </div>
@@ -521,12 +678,6 @@ function ConfigPanel({ stageId, config, onChange }) {
     <div className="space-y-3">
       <LibCorner />
       <div className="grid grid-cols-2 gap-3">
-        <Field label="Clock Port" tip={TOOLTIPS.clock_port_cts}><Inp value={config.clock_port} onChange={v => set("clock_port", v)} /></Field>
-        <Field label="Clock Period (ns)" tip={TOOLTIPS.clock_period_ns_synth}>
-          <Inp type="number" value={config.clock_period_ns} onChange={v => set("clock_period_ns", v)} min={1} max={200} step={0.5} />
-        </Field>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
         <Field label="Max Slew (ns)" tip={TOOLTIPS.cts_max_slew}>
           <Inp type="number" value={config.cts_max_slew} onChange={v => set("cts_max_slew", v)} min={0.1} max={2} step={0.05} />
         </Field>
@@ -534,9 +685,28 @@ function ConfigPanel({ stageId, config, onChange }) {
           <Inp type="number" value={config.cts_max_cap} onChange={v => set("cts_max_cap", v)} min={0.01} max={0.5} step={0.01} />
         </Field>
       </div>
-      <Field label="Buffer Cells (space-separated)" tip={TOOLTIPS.cts_buf_list}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Sink Cluster Size" tip={TOOLTIPS.sink_clustering_size}>
+          <Inp type="number" value={config.sink_clustering_size} onChange={v => set("sink_clustering_size", v)} min={4} max={64} step={1} />
+        </Field>
+        <Field label="Max Cluster Diameter (µm)" tip={TOOLTIPS.sink_clustering_max_diameter}>
+          <Inp type="number" value={config.sink_clustering_max_diameter} onChange={v => set("sink_clustering_max_diameter", v)} min={10} max={200} step={5} />
+        </Field>
+      </div>
+      <Field label="Root Buffer Cell" tip={TOOLTIPS.cts_root_buf}>
+        <Inp value={config.cts_root_buf} onChange={v => set("cts_root_buf", v)} />
+      </Field>
+      <Field label="Buffer Cell List (space-separated)" tip={TOOLTIPS.cts_buf_list}>
         <Inp value={config.cts_buf_list} onChange={v => set("cts_buf_list", v)} />
       </Field>
+      <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
+        <Field label="Hold Margin (ns)" tip={TOOLTIPS.hold_margin_placement}>
+          <Inp type="number" value={config.hold_margin} onChange={v => set("hold_margin", v)} min={0} max={0.5} step={0.01} />
+        </Field>
+        <Field label="Max Repair Util (%)" tip={TOOLTIPS.max_repair_util}>
+          <Inp type="number" value={config.max_repair_util} onChange={v => set("max_repair_util", v)} min={50} max={95} step={1} />
+        </Field>
+      </div>
       <div className="grid grid-cols-2 gap-3 border-t border-[#2a2a3a] pt-3">
         <Field label="✓ WNS Margin (ns)" tip={TOOLTIPS.wns_margin_ns}>
           <Inp type="number" value={config.wns_margin_ns ?? ""} onChange={v => set("wns_margin_ns", isNaN(v) ? "" : v)} min={0} max={10} step={0.1} />
@@ -548,7 +718,15 @@ function ConfigPanel({ stageId, config, onChange }) {
   if (stageId === "spef") return (
     <div className="space-y-3">
       <LibCorner />
-      <p className="text-xs text-[#888896]">RC extraction runs automatically after routing. Results are used by timing analysis if available.</p>
+      <p className="text-xs text-[#888896]">RC extraction reads actual routed wire shapes and produces a SPEF file. The timing stage loads this for sign-off accuracy.</p>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Max Segment Resistance (Ω)" tip={TOOLTIPS.max_res_spef}>
+          <Inp type="number" value={config.max_res} onChange={v => set("max_res", v)} min={1} max={500} step={5} />
+        </Field>
+        <Field label="Coupling Threshold (fF)" tip={TOOLTIPS.coupling_threshold}>
+          <Inp type="number" value={config.coupling_threshold} onChange={v => set("coupling_threshold", v)} min={0} max={10} step={0.05} />
+        </Field>
+      </div>
     </div>
   );
 
@@ -559,7 +737,7 @@ function ConfigPanel({ stageId, config, onChange }) {
   return null;
 }
 
-// Verification checks UI 
+// ── Verification checks UI ────────────────────────────────────────────────────
 
 function CheckStatusIcon({ status }) {
   if (status === "ok")      return <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0 mt-0.5" />;
@@ -1074,7 +1252,13 @@ function MultiCornerPanel({ runId, configs }) {
           ...configs["timing"],
           top_module: "top",
           run_id: runId,
-          corner: corner.id,
+          // Multi-corner panel overrides both sign-off corners to the same value
+          // so each run uses symmetric analysis for comparison purposes.
+          setup_corner: corner.id,
+          hold_corner:  corner.id,
+          // Per-corner report file: sweep runs must never clobber the main
+          // sign-off timing.rpt (or the Path tab / meta it feeds).
+          report_name:  "timing_" + corner.id + ".rpt",
         };
         const res = await fetch(PD_API + "/timing", {
           method: "POST",
@@ -2318,7 +2502,7 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
       .then(r => r.ok ? r.json() : null)
       .then(meta => {
         if (!meta) {
-          if (session.configs) setConfigs(session.configs);
+          if (session.configs) setConfigs(Object.fromEntries(Object.entries(DEFAULT_CONFIGS).map(([k, v]) => [k, { ...v, ...(session.configs[k] || {}) }])));
           clearSession();
           return;
         }
@@ -2331,7 +2515,7 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
           }
           return saved ? { ...s, status: saved.status, timeTaken: saved.timeTaken } : s;
         }));
-        if (session.configs) setConfigs(session.configs);
+        if (session.configs) setConfigs(Object.fromEntries(Object.entries(DEFAULT_CONFIGS).map(([k, v]) => [k, { ...v, ...(session.configs[k] || {}) }])));
         if (session.outputs) setOutputs(session.outputs);
         // Restore verification checks for every completed checkable stage
         const cfgsForChecks = session.configs || configs;
@@ -2340,7 +2524,7 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
         }
       })
       .catch(() => {
-        if (session.configs) setConfigs(session.configs);
+        if (session.configs) setConfigs(Object.fromEntries(Object.entries(DEFAULT_CONFIGS).map(([k, v]) => [k, { ...v, ...(session.configs[k] || {}) }])));
       });
   }, []);
 
@@ -2432,7 +2616,13 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
       }
 
       const elapsed  = parseFloat(((Date.now() - t0) / 1000).toFixed(2));
-      const hadError = full.includes("[ERROR") || full.includes("exit code: 1") || full.includes("Error:");
+      // Trust the backend's final verdict: stages may recover from
+      // intermediate [ERROR ...] lines (e.g. legalization retry), so a
+      // substring match anywhere in the log gives false failures.
+      const exitMatch = full.match(/\[DONE\] Exit code (\d+)/);
+      const hadError = exitMatch
+        ? exitMatch[1] !== "0"
+        : (full.includes("[ERROR") || full.includes("exit code: 1") || full.includes("Error:"));
       setStatus(selected, hadError ? "error" : "complete", elapsed);
     if (selected === "drc" && !hadError) setTerminalView("drc");
       if (!hadError) appendLine(selected, "[DONE] " + currentStage.name + " completed in " + elapsed + "s");

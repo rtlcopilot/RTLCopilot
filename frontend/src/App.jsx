@@ -9,6 +9,13 @@ import { API_BASE, supabase } from "./config";
 
 const OFFLINE_MODE = import.meta.env.VITE_OFFLINE_MODE === "true";
 import { nextFreeIndex, detectLoops, stripNodeForSave } from "./utils";
+import {
+  loadPortContract,
+  resolveWidth as pcResolveWidth,
+  requiredInputs as pcRequiredInputs,
+  validHandles as pcValidHandles,
+  canonical as pcCanonical,
+} from "./portContract";
 import { COMPONENTS, COMPONENT_CATEGORIES } from "./componentCategories";
 import { nodeTypes, edgeTypes } from "./nodeTypes";
 
@@ -83,6 +90,10 @@ export default function App() {
   const [activeTab,          setActiveTab]          = useState("rtl");
   const [bottomPanelHeight,  setBottomPanelHeight]  = useState(340);
   const [drcLogs,            setDrcLogs]            = useState([]);
+
+  // Pull the port width contract from the backend once, so canvas DRC and the
+  // Verilog emitter agree on every handle width.
+  useEffect(() => { loadPortContract(); }, []);
 
   const [simulationResult, setSimulationResult] = useState(null);
   const [showWaveform,     setShowWaveform]     = useState(false);
@@ -619,27 +630,21 @@ export default function App() {
 
   const runDRC = () => {
     const errorNodes = new Set(); const warnNodes = new Set(); const logs = [];
+
+    // Widths come from the shared port contract (backend/port_contract.py,
+    // served at /handle_contract) rather than tables maintained here. The two
+    // used to disagree — bitwise comb ops were checked as 1-bit while the
+    // emitter built them operand-wide, so an 8-bit ALU lit up with mismatches
+    // that were artefacts of the checker, not the design.
     const resolveOutWidth = (node, srcPort) => {
       if (!node) return 1;
-      const w = parseInt(node.data.width || "1");
-      if (node.type === "macro_fifo") return ["full","empty","ae"].includes(srcPort) ? 1 : w;
-      if (node.type === "macro_penc") return srcPort === "valid" ? 1 : Math.max(1, Math.ceil(Math.log2(Math.max(w, 2))));
-      if (node.type === "macro_cfgcounter") return srcPort === "tc" ? 1 : w;
-      if (node.type === "macro_edgedet") return 1;
-      return w;
+      const w = pcResolveWidth(node.type, srcPort, "outputs", node.data);
+      if (w === undefined) return parseInt(node.data.width || "1");
+      return w;                                  // may be null = unconstrained
     };
-    const expectedPinWidth = (node, pinId) => {
-      const w = parseInt(node.data.width || "1");
-      if (node.type === "mux") return pinId.startsWith("sel") ? 1 : w;
-      if (node.type === "macro_fifo") return (pinId === "wr_en" || pinId === "rd_en") ? 1 : w;
-      if (node.type === "macro_cfgcounter") return (pinId === "enable" || pinId === "load") ? 1 : w;
-      if (node.type === "macro_dpram") { const aw = parseInt(node.data.addrWidth || "6"); if (pinId === "we_a" || pinId === "we_b") return 1; if (pinId === "addr_a" || pinId === "addr_b") return aw; return w; }
-      if (node.type === "macro_edgedet") return 1;
-      if (node.type === "splitter" || node.type === "concatenator") return null;
-      if (node.type === "macro_counter") return (pinId === "en" || pinId === "res") ? 1 : w;
-      if (node.type === "macro_shiftreg") return pinId === "en" ? 1 : w;
-      return w;
-    };
+    const expectedPinWidth = (node, pinId) =>
+      pcResolveWidth(node.type, pinId, "inputs", node.data);
+
     nodes.forEach((targetNode) => {
       const incomingEdges = edges.filter((e) => e.target === targetNode.id);
       const usedHandles = new Set();
@@ -658,19 +663,29 @@ export default function App() {
           return;
         }
         const expected = expectedPinWidth(targetNode, pinId);
-        if (expected !== null && actualSrcWidth !== expected) {
+        if (expected === undefined) {
+          // The contract declares no such input handle — a wiring bug, not a
+          // width bug, and worth naming explicitly.
+          errorNodes.add(targetNode.id);
+          const valid = pcValidHandles(targetNode.type, "inputs", targetNode.data);
+          logs.push(`❌ Unknown pin: ${targetNode.data.name}.${pinId} is not an input of ${targetNode.type}` +
+                    (valid.length ? ` (valid: ${valid.join(", ")})` : ""));
+        } else if (expected !== null && actualSrcWidth !== null &&
+                   actualSrcWidth !== expected) {
           errorNodes.add(targetNode.id); errorNodes.add(srcNode.id);
           logs.push(`📏 Width mismatch: ${srcNode.data.name}.${srcPort} (${actualSrcWidth}-bit) → ${targetNode.data.name}.${pinId} (expects ${expected}-bit)`);
         }
       });
-      const connectedPins = new Set(incomingEdges.map((e) => e.targetHandle));
-      if (targetNode.type === "comb") {
-        const unary = targetNode.data.op === "buf" || targetNode.data.op === "not";
-        if (!connectedPins.has("in0")) { warnNodes.add(targetNode.id); logs.push(`⚠️  ${targetNode.data.name}: input "in0" unconnected`); }
-        if (!unary && !connectedPins.has("in1")) { warnNodes.add(targetNode.id); logs.push(`⚠️  ${targetNode.data.name}: input "in1" unconnected`); }
-      }
-      const REQUIRED_PINS = { reg: ["d"], macro_counter: ["en"], macro_shiftreg: ["din","en"], macro_sync: ["d"], macro_edgedet: ["signal_in"], macro_cfgcounter: ["enable"], macro_fifo: ["wr_en","din","rd_en"], macro_dpram: ["addr_a","addr_b"] };
-      (REQUIRED_PINS[targetNode.type] || []).forEach((pin) => { if (!connectedPins.has(pin)) { warnNodes.add(targetNode.id); logs.push(`⚠️  ${targetNode.data.name}: required pin "${pin}" unconnected`); } });
+      // Canonicalise so a pin wired as "enable" satisfies a required "en".
+      const connectedPins = new Set(
+        incomingEdges.map((e) => pcCanonical(e.targetHandle, targetNode.type))
+      );
+      pcRequiredInputs(targetNode.type, targetNode.data).forEach((pin) => {
+        if (!connectedPins.has(pin)) {
+          warnNodes.add(targetNode.id);
+          logs.push(`⚠️  ${targetNode.data.name}: required pin "${pin}" unconnected`);
+        }
+      });
     });
     detectLoops(nodes, edges).forEach((msg) => {
       logs.push(`🔄 ${msg}`);

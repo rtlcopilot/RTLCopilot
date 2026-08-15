@@ -1,3 +1,5 @@
+
+
 import json
 import math
 import os
@@ -68,6 +70,8 @@ def _pol(policy, key):
         "ships with the container), place an override copy in the work "
         "volume, or set the PDV_" + key.upper() + " environment variable.")
 
+
+# Low-level parsing helpers 
 
 def _read_stage_text(stage: str, run_dir, stdout_text: str = "") -> str:
     """Return the best available text for a stage: on-disk log preferred,
@@ -145,6 +149,8 @@ def _fmt(v, digits=4):
         return s if s not in ("", "-") else "0"
     return str(v)
 
+
+#Violation table parsing 
 
 def parse_violation_table(text: str) -> dict:
     """Parse the LAST 'Viol/Layer' table from an OpenROAD detailed route log.
@@ -252,6 +258,8 @@ def _parse_clock_skew(text: str) -> float:
     return _last_float([r"\bskew[:\s]+(-?[\d\.]+)"], text)
 
 
+# Metric extraction 
+
 def extract_stage_metrics(stage: str, run_dir, stdout_text: str = "") -> dict:
     """Extract real metrics from a completed stage's tool output.
     Prefers the on-disk log file; falls back to captured stdout.
@@ -310,10 +318,17 @@ def _extract_placement(text: str) -> dict:
                              or _last_int([r"Placed\s+(\d+)\s+instances",
                                            r"[Nn]umber of instances[:\s]+(\d+)",
                                            r"[Ii]nstance count[:\s]+(\d+)"], text)),
+        # Signed worst slack from the resizer ("worst slack max N").
+        # Canonical key: setup_worst_slack_ns. setup_wns_ns is kept as a
+        # legacy alias — the value is worst SLACK (can be positive), not a
+        # clamped WNS, despite the historical name.
         "setup_wns_ns":     (s.get("setup_wns_ns")
                              if s.get("setup_wns_ns") is not None
                              else _last_float([r"worst slack (?:max\s+)?(-?[\d\.]+)"], text)),
-    }
+    } | (lambda v: {"setup_worst_slack_ns": v} if v is not None else {})(
+        _to_float(s.get("setup_wns_ns"))
+        if s.get("setup_wns_ns") is not None
+        else _last_float([r"worst slack (?:max\s+)?(-?[\d\.]+)"], text))
 
 
 def _extract_cts(text: str) -> dict:
@@ -330,16 +345,24 @@ def _extract_cts(text: str) -> dict:
                                     r"Created\s+(\d+)\s+(?:clock\s+)?buffers",
                                     r"Total number of buffers inserted[:\s]+(\d+)",
                                     r"(\d+)\s+clock buffers"], text),
+        # Legacy aliases (values are signed worst slack, see placement note)
         "setup_wns_ns":  setup,
         "hold_wns_ns":   hold,
+        "setup_worst_slack_ns": _to_float(setup),
+        "hold_worst_slack_ns":  _to_float(hold),
     }
 
 
 def _extract_routing(text: str) -> dict:
     vt = parse_violation_table(text)
+    _drc = _last_int([r"[Nn]umber of violations\s*=\s*(\d+)"], text)
+    if not _drc:
+        # the Viol/Layer table lists per-ITERATION tallies; on a clean final
+        # result surfacing them misleads (e.g. "Short: 11" beside drc=0)
+        vt = None
     return {
         # detailed_route prints these once per iteration — take the LAST
-        "drc_violations":     _last_int([r"[Nn]umber of violations\s*=\s*(\d+)"], text),
+        "drc_violations":     _drc,
         "wire_length_um":     _last_float([r"Total wire length\s*=\s*([\d\.]+)"], text),
         "via_count":          _last_int([r"Total number of vias\s*=\s*(\d+)"], text),
         "violation_types":    vt if vt else None,
@@ -355,13 +378,19 @@ def _extract_timing(text: str) -> dict:
     (wns_ns, slack_ns, power_w, cell_count) — library-agnostic patterns,
     no hardcoded cell footprints."""
     return {
+        # wns_ns: from report_wns — clamped to 0.00 on passing designs
+        # (violations-only). For margin, use the signed worst-slack keys.
         "wns_ns":     _last_float([r"\bwns\s+(?:max\s+)?(-?[\d\.]+)"], text),
+        "setup_worst_slack_ns": _last_float([r"worst slack max\s+(-?[\d\.]+)"], text),
+        "hold_worst_slack_ns":  _last_float([r"worst slack min\s+(-?[\d\.]+)"], text),
         "tns_ns":     _last_float([r"\btns\s+(?:max\s+)?(-?[\d\.]+)"], text),
         "slack_ns":   _last_float([r"(-?[\d\.]+)\s+slack \((?:MET|VIOLATED)\)"], text),
         "power_w":    _last_float([r"Total\s+[\d\.eE\+\-]+\s+[\d\.eE\+\-]+\s+[\d\.eE\+\-]+\s+([\d\.eE\+\-]+)"], text),
         "cell_count": _last_int([r"[Nn]umber of instances[:\s]+(\d+)"], text),
     }
 
+
+# Geometry helpers
 
 def _die_geometry(meta: dict):
     """Parse floorplan geometry stored in run_meta. Returns dict with die
@@ -404,7 +433,7 @@ def _cell_density_pct(chip_area_um2, geo):
     return chip_area_um2 / geo["die_area"] * 100.0
 
 
-# Check construction 
+# Check construction
 
 def _check(check_id, label, status, value=None, unit="", message=""):
     return {"id": check_id, "label": label, "status": status,
@@ -417,19 +446,19 @@ def _wns_check(check_id, label, wns, margin, config_hint):
     from the user, never from code or policy."""
     if wns is None:
         return _check(check_id, label, "warning", None, "ns",
-                      "Setup WNS could not be extracted.")
+                      "Setup worst slack could not be extracted.")
     if wns < 0:
         return _check(check_id, label, "error", wns, "ns",
                       f"Setup timing VIOLATED — worst slack {_fmt(wns)}ns is negative.")
     if margin is None:
         return _check(check_id, label, "unset", wns, "ns",
-                      f"Setup WNS is {_fmt(wns)}ns (positive). Set \"{config_hint}\" in the Config "
+                      f"Setup worst slack is {_fmt(wns)}ns (positive). Set \"{config_hint}\" in the Config "
                       f"panel to enable margin checking.")
     if wns < margin:
         return _check(check_id, label, "warning", wns, "ns",
-                      f"Setup WNS {_fmt(wns)}ns is positive but below your {_fmt(margin)}ns margin.")
+                      f"Setup worst slack {_fmt(wns)}ns is positive but below your {_fmt(margin)}ns margin.")
     return _check(check_id, label, "ok", wns, "ns",
-                  f"Setup WNS {_fmt(wns)}ns meets your {_fmt(margin)}ns margin.")
+                  f"Setup worst slack {_fmt(wns)}ns meets your {_fmt(margin)}ns margin.")
 
 
 def run_checks(meta: dict, stage: str, thresholds: dict = None, policy: dict = None) -> list:
@@ -598,6 +627,8 @@ def run_checks(meta: dict, stage: str, thresholds: dict = None, policy: dict = N
     return checks
 
 
+# Fix computation 
+
 def _fix(fix_id, label, stage, field, current, proposed, reason, context):
     return {"id": fix_id, "label": label, "stage": stage, "field": field,
             "current_value": current, "proposed_value": proposed,
@@ -653,7 +684,7 @@ def _routing_fixes(meta, policy):
     chip_area = _to_float(syn.get("chip_area_um2"))
     geo = _die_geometry(meta)
 
-    # Step 1
+    # Step 1: is the die fundamentally too small? 
     density_pct = _cell_density_pct(chip_area, geo)
     if density_pct is not None and density_pct > _pol(policy, "die_density_limit_pct"):
         f = _die_area_fix(meta, chip_area, geo, density_pct, policy,
@@ -661,7 +692,7 @@ def _routing_fixes(meta, policy):
         if f:
             return [f], None  # stop: nothing else matters until the die is fixed
 
-    # Step 2
+    # Step 2: what dominates?
     vt = normalize_violation_types(rt.get("violation_types"))
     total_typed = sum(vt.values())
     shorts = sum(v for k, v in vt.items() if "short" in k.lower())
@@ -732,7 +763,7 @@ def _routing_fixes(meta, policy):
         if f:
             return [f], None
 
-
+    # Dead end: every deterministic knob is exhausted 
     exhausted = []
     if spacing_dominant:
         exhausted.append("iteration bumps won't help spacing violations")
@@ -774,7 +805,7 @@ def _placement_fixes(meta, thresholds, policy):
     pl = stages.get("placement", {}) or {}
     fixes = []
 
-    # Setup WNS violation 
+    # Setup WNS violation → relax clock from real numbers, not a % bump.
     wns = _to_float(pl.get("setup_wns_ns"))
     period = (_to_float(pl.get("clock_period_ns"))
               or _pol(policy, "default_clock_period_ns"))
@@ -784,7 +815,7 @@ def _placement_fixes(meta, thresholds, policy):
         if f:
             fixes.append(f)
 
-    # Over-utilization 
+    # Over-utilization → target die from synthesis chip area (only if larger).
     util = _to_float(pl.get("utilization_pct"))
     max_util = _to_float((thresholds or {}).get("max_util_pct"))
     if util is not None and max_util is not None and util > max_util:
@@ -866,6 +897,8 @@ def compute_fixes(meta: dict, stage: str, thresholds: dict = None, policy: dict 
     except Exception:
         return [], None
 
+
+#  Public entrypoint for the /check endpoint 
 
 def evaluate(meta: dict, stage: str, thresholds: dict = None) -> dict:
     """Full check + fix payload for GET /check/{run_id}/{stage}. If the policy

@@ -1,21 +1,8 @@
-"""
-block_mapper.py — RTLCopilot Deterministic Block Mapper
-========================================================
-Maps generic block names (from Stage 0 LLM decomposition) to
-specific RTLCopilot primitives with exact handle names and widths.
 
-No LLM involved — pure Python lookup table.
-The LLM in Stage 0 outputs generic names from GENERIC_VOCABULARY.
-Python maps them here to primitives. Stage 1 receives fixed primitives
-with handles already stamped — never invents handle names.
-
-GENERIC_VOCABULARY is the closed list Stage 0 must choose from.
-_GENERIC_TO_PRIMITIVE is the mapping table.
-map_concepts_to_primitives() is the main entry point.
-"""
 
 from __future__ import annotations
 
+import port_contract as pc
 
 GENERIC_VOCABULARY: list[str] = [
     "counter",              
@@ -237,8 +224,8 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "inputs":  ["in0", "in1"],
             "outputs": ["out"],
         },
-        "width_rule": "1",
-        "notes": "comb_op=xor across all data bits",
+        "width_rule": "data",
+        "notes": "comb_op=xor — bitwise across DATA_WIDTH across all data bits",
     },
 
     "inverter": {
@@ -248,8 +235,8 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "inputs":  ["in0"],
             "outputs": ["out"],
         },
-        "width_rule": "1",
-        "notes": "comb_op=not — single input inversion",
+        "width_rule": "data",
+        "notes": "comb_op=not — bitwise inversion across DATA_WIDTH",
     },
     "and_gate": {
         "pattern": "comb",
@@ -258,8 +245,8 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "inputs":  ["in0", "in1"],
             "outputs": ["out"],
         },
-        "width_rule": "1",
-        "notes": "comb_op=and — gating or masking",
+        "width_rule": "data",
+        "notes": "comb_op=and — bitwise across DATA_WIDTH — gating or masking",
     },
     "or_gate": {
         "pattern": "comb",
@@ -268,8 +255,8 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "inputs":  ["in0", "in1"],
             "outputs": ["out"],
         },
-        "width_rule": "1",
-        "notes": "comb_op=or",
+        "width_rule": "data",
+        "notes": "comb_op=or — bitwise across DATA_WIDTH",
     },
     "xor_gate": {
         "pattern": "comb",
@@ -278,8 +265,8 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "inputs":  ["in0", "in1"],
             "outputs": ["out"],
         },
-        "width_rule": "1",
-        "notes": "comb_op=xor",
+        "width_rule": "data",
+        "notes": "comb_op=xor — bitwise across DATA_WIDTH",
     },
     "adder": {
         "pattern": "comb",
@@ -304,20 +291,28 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
     "multiplexer": {
         "pattern": "mux",
         "handles": {
-            "inputs":  ["in0", "in1", "sel"],
+            "inputs":  ["in0", "in1", "sel0"],
             "outputs": ["out"],
         },
         "width_rule": "data",
-        "notes": "sel=1-bit; in0/in1=DATA_WIDTH",
+        # mux_size may be raised by Stage 0 via the `mux_size` concept field
+        # (e.g. 8 for an 8-operation ALU result mux). The port contract then
+        # expands the handle set to in0..in7 + sel0..sel2 — each sel bit is a
+        # SEPARATE 1-bit handle, so a multi-bit select must be split with a
+        # splitter node before it can be wired.
+        "mux_size": 2,
+        "notes": "in0..inN = DATA_WIDTH; select is per-bit (sel0, sel1, ...), "
+                 "each 1 bit — split a multi-bit select with a splitter node",
     },
     "demultiplexer": {
         "pattern": "mux",
         "handles": {
-            "inputs":  ["in0", "in1", "sel"],
+            "inputs":  ["in0", "in1", "sel0"],
             "outputs": ["out"],
         },
         "width_rule": "data",
-        "notes": "Use mux in reverse routing context",
+        "mux_size": 2,
+        "notes": "Use mux in reverse routing context; select is per-bit (sel0, ...)",
     },
 
     "fifo": {
@@ -359,10 +354,13 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
     "shift_register": {
         "pattern": "macro_shiftreg",
         "handles": {
+            # Live handles depend on srMode and are derived from the port
+            # contract: PISO/SISO expose sout, SIPO/PIPO expose q.
             "inputs":  ["din", "en", "load"],
-            "outputs": ["sout", "q"],
+            "outputs": ["sout"],
         },
         "width_rule": "data",
+        "sr_mode": "PISO",
         "notes": "Set srMode: PISO for TX, SIPO for RX, width=DATA_WIDTH",
     },
     "serializer": {
@@ -372,16 +370,18 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "outputs": ["sout"],
         },
         "width_rule": "data",
-        "notes": "srMode=PISO — parallel in, serial out. din width=DATA_WIDTH (parallel byte), sout width=1 (serial bit). Set width=DATA_WIDTH in parameters.",
+        "sr_mode": "PISO",
+        "notes": "srMode=PISO — parallel in, serial out. din=DATA_WIDTH (parallel byte), sout=1 bit.",
     },
     "deserializer": {
         "pattern": "macro_shiftreg",
         "handles": {
-            "inputs":  ["din", "en", "load"],
+            "inputs":  ["sin", "en", "load"],
             "outputs": ["q"],
         },
         "width_rule": "data",
-        "notes": "srMode=SIPO — serial in, parallel out. din width=1 (serial bit), q width=DATA_WIDTH (parallel byte). Set width=DATA_WIDTH in parameters.",
+        "sr_mode": "SIPO",
+        "notes": "srMode=SIPO — serial in, parallel out. sin=1 bit (serial), q=DATA_WIDTH (parallel byte).",
     },
     "pipeline_register": {
         "pattern": "reg",
@@ -566,20 +566,72 @@ def map_concepts_to_primitives(
             unknown.append(gtype)
             continue
 
+        pattern = rule["pattern"]
+        comb_op = rule.get("comb_op")
+
+        # DATA_WIDTH for this block. Stage 0's width_hint is advisory only —
+        # it sets the block's data width, but it never decides an individual
+        # handle's width. That is the port contract's job.
+        try:
+            data_width = max(1, int(str(c.get("width_hint", "8")).strip()))
+        except (TypeError, ValueError):
+            data_width = 8
+
+        mux_size = int(c.get("mux_size") or rule.get("mux_size") or 2)
+        sr_mode  = str(c.get("sr_mode") or rule.get("sr_mode") or "PISO").upper()
+        addr_w   = int(c.get("addr_width") or 6)
+
+        # Resolve every handle's width from the contract. For FSM patterns the
+        # handle names are design-specific signals (supplied in Stage 3), so
+        # the static placeholder list is kept and every signal is 1 bit.
+        if pattern in ("fsm", "fsm_state"):
+            handles = rule["handles"]
+            handle_widths = {"inputs": {}, "outputs": {}}
+        else:
+            resolved = pc.port_widths(
+                pattern, data_width=data_width, comb_op=comb_op,
+                addr_width=addr_w, sr_mode=sr_mode, mux_size=mux_size)
+            handles = {
+                "inputs":  list(resolved["inputs"].keys()),
+                "outputs": list(resolved["outputs"].keys()),
+            }
+            handle_widths = resolved
+
+            declared = set(rule["handles"].get("inputs", [])) | \
+                       set(rule["handles"].get("outputs", []))
+            contract_names = set(handles["inputs"]) | set(handles["outputs"])
+            drift = {h for h in declared if not h.startswith("<")} - contract_names
+            if drift:
+                print(f"[MAPPER] WARNING: '{gtype}' table lists handle(s) "
+                      f"{sorted(drift)} that the port contract does not "
+                      f"declare for pattern '{pattern}' — contract wins",
+                      flush=True)
+
         mapped_concept = {
             "id":               c.get("suggested_id", gtype),
             "name":             c.get("suggested_id", gtype),
             "role":             c.get("role", ""),
-            "width_hint":       c.get("width_hint", "8"),
+            "width_hint":       str(data_width),
             "connection_hints": c.get("connection_hints", ""),
             "fsm_states":       c.get("fsm_states", []),
             "fsm_outputs":      c.get("fsm_outputs", []),
 
-            "pattern":          rule["pattern"],
-            "comb_op":          rule.get("comb_op"),        
-            "handles":          rule["handles"],            
+            "pattern":          pattern,
+            "comb_op":          comb_op,
+            "handles":          handles,
+            # Per-handle widths, resolved deterministically. Stage 1 and the
+            # assembler read THIS, never the LLM's own width guesses.
+            "handle_widths":    handle_widths,
+            "data_width":       data_width,
+            "mux_size":         mux_size,
+            "sr_mode":          sr_mode,
+            "addr_width":       addr_w,
+            # Legacy field, retained so older callers keep working. Derived,
+            # not authoritative — prefer handle_widths.
             "width_rule":       rule["width_rule"],
             "mapper_notes":     rule["notes"],
+            "required_inputs":  pc.required_inputs(
+                pattern, comb_op=comb_op, sr_mode=sr_mode, mux_size=mux_size),
         }
         mapped.append(mapped_concept)
         print(
@@ -654,7 +706,11 @@ def get_stage0_vocabulary_prompt() -> str:
 
     lines.append(
         "RULE: generic_type must be EXACTLY one of the above strings.\n"
-        "NEVER invent a new generic_type. If unsure, pick the closest match\n"
-        "and explain in the role field."
+        "NEVER invent a new generic_type.\n\n"
+        "If the circuit needs a function that is NOT in this list, do NOT "
+        "force-fit it to the nearest name — that produces a circuit that looks "
+        "finished and is wrong. Instead return clarification_needed with a "
+        "question naming the missing function, so the user can describe how to "
+        "build it from these blocks."
     )
     return "\n".join(lines)

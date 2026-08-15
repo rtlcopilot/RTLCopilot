@@ -49,7 +49,8 @@ RTL Brain (the AI generation pipeline) is experimental. It works well for common
 |---|---|
 | Frontend | React, ReactFlow, Electron |
 | Backend | FastAPI (Python) |
-| Auth + DB | Supabase |
+| Auth + DB | Supabase (optional — offline mode uses local JSON) |
+| Port widths | Shared contract (`backend/port_contract.py`) consumed by backend and canvas |
 | Verilog emit | Custom deterministic emitter (`backend/rtl_codegen/`) |
 | Simulation | iverilog + vvp |
 | AI | BYOK — bring your own OpenAI / Groq / NVIDIA NIM key |
@@ -62,11 +63,32 @@ RTL Brain (the AI generation pipeline) is experimental. It works well for common
 ```
 rtlcopilot/
 ├── backend/                    ← Main FastAPI backend
-│   ├── api.py                  ← Routes + RTL Brain pipeline
-│   ├── block_mapper.py         ← Generic → primitive block mapping
-│   ├── known_circuits.py       ← Hardcoded known circuit hierarchies
-│   ├── net_ir.py               ← IR validation
+│   │
+│   │  ── HTTP layer ──
+│   ├── api.py                  ← FastAPI app, middleware, all 24 routes
+│   ├── models.py               ← Pydantic request/response models
+│   ├── core.py                 ← Config, paths, LLM client, auth, offline mode
+│   ├── state.py                ← Process-wide mutable state (FSM tables, caches)
+│   │
+│   │  ── AI generation pipeline ──
+│   ├── rtl_brain.py            ← Stage 0-3 pipeline + hierarchy assembler
+│   ├── prompts.py              ← All LLM prompt templates + custom-block schemas
+│   ├── block_mapper.py         ← Generic vocabulary → primitive block mapping
+│   ├── known_circuits.py       ← Deterministic circuit hierarchies (no LLM)
+│   ├── generation_errors.py    ← Explicit failure types returned to the UI
+│   ├── legacy_hierarchical.py  ← Older decomposition path (fallback only)
+│   │
+│   │  ── IR and emission ──
+│   ├── port_contract.py        ← Per-handle width contract — single source of truth
+│   ├── ir_checks.py            ← IR design-rule checks + semantic annotation
+│   ├── hierarchical_v2.py      ← Hierarchy → canvas nodes → Verilog
+│   ├── net_ir.py               ← Net-level IR construction and validation
+│   ├── verilog_tools.py        ← iverilog compile check, LLM repair
 │   ├── semantic_library.py     ← Behavioral models for verification
+│   │
+│   ├── tests/
+│   │   └── test_port_contract.py  ← Contract lint + known-circuit validation
+│   │
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── rtl_codegen/            ← Verilog emitters
@@ -78,7 +100,8 @@ rtlcopilot/
 │       └── ...
 ├── frontend/                   ← Electron + React canvas
 │   ├── src/
-│   │   ├── App.jsx             ← Main canvas shell
+│   │   ├── App.jsx             ← Main canvas shell + canvas DRC
+│   │   ├── portContract.js     ← Client for the backend port width contract
 │   │   ├── PDPage.jsx          ← Physical design flow UI
 │   │   ├── components/
 │   │   └── ...
@@ -101,6 +124,44 @@ rtlcopilot/
 ├── LICENSE
 ├── schema.sql                  ← Supabase table definitions
 └── .gitignore
+```
+
+---
+
+## The port contract
+
+Bit widths used to be decided independently in several places — the block
+mapper, the assembler, the IR checker, the Verilog emitter, and the canvas DRC
+each carried their own table. They drifted, and the symptom was width-mismatch
+errors on designs that were actually fine (or, worse, silently truncated logic
+on designs that were not).
+
+`backend/port_contract.py` now declares width once, per `(pattern, handle)`
+pair:
+
+```python
+"macro_cfgcounter": {
+    "inputs":  {"en": ONE, "load": ONE, "load_val": DATA},
+    "outputs": {"count": DATA, "tc": ONE},
+},
+```
+
+Everything resolves through it, including the browser — the canvas fetches the
+contract from `GET /handle_contract` so the DRC panel checks exactly the rules
+the emitter obeys.
+
+Two things follow from this that are worth knowing when adding blocks:
+
+- A `comb` node's `width` is its **operand** width. The output width comes from
+  the op: comparisons (`eq`, `lt`, …) are 1 bit, `mul` is double, everything
+  else matches the operands.
+- A splitter's `width` is the **slice** width, not the source width.
+
+`backend/tests/test_port_contract.py` lints the contract and validates every
+entry in `known_circuits.py` against it. Run it after touching either:
+
+```bash
+cd backend && python3 tests/test_port_contract.py
 ```
 
 ---
@@ -160,7 +221,20 @@ pip install -r requirements.txt
 uvicorn api:app --port 8080
 ```
 
-Offline mode bypasses Google OAuth and uses a local JSON file for project storage. You still need an LLM API key (OpenAI, Groq, etc.) in the Settings panel for AI features to work.
+Offline mode bypasses Google OAuth and uses a local JSON file for project
+storage. It is implemented in `backend/core.py` (`_OFFLINE_MODE`,
+`_get_current_user`, `_local_db_load` / `_local_db_save`). You still need an LLM
+API key in the Settings panel for AI features to work.
+
+**LLM timeouts.** Model calls default to a 90-second timeout with SDK-level
+retries disabled, so a slow or cold-starting endpoint fails readably instead of
+blocking the server. Self-hosted and on-demand providers (NVIDIA NIM, Ollama,
+vLLM) load models on demand and may need longer:
+
+```bash
+LLM_TIMEOUT_SECONDS=120   # default 90
+LLM_MAX_RETRIES=0         # leave at 0; the pipeline handles retries itself
+```
 
 ---
 
@@ -303,7 +377,7 @@ The preview PNG is cached and regenerates automatically when the source DEF or G
 
 ## RTL Brain — AI pipeline
 
-RTL Brain converts natural language circuit descriptions into Verilog through a 4-stage pipeline:
+RTL Brain converts natural language circuit descriptions into Verilog through a 4-stage pipeline in `backend/rtl_brain.py`:
 
 ```
 Stage 0 — Decompose prompt into generic blocks (closed vocabulary)
@@ -312,7 +386,19 @@ Stage 2 — Extract connectivity and signal list
 Stage 3 — Generate FSM transition tables
 ```
 
-It is **experimental**. Known limitations are documented in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). Contributions to improve it are very welcome.
+Widths are **not** decided by the model. Stage 0 and Stage 1 choose blocks and
+connections; every handle width comes from `port_contract.py`. Conflicts the
+assembler cannot reconcile are collected in `hierarchy["width_conflicts"]`
+rather than being passed to the canvas.
+
+Requests that name a circuit in `known_circuits.py` skip the pipeline entirely
+and build from a fixed hierarchy — deterministic, no LLM calls, identical every
+time. Adding entries there is the highest-leverage contribution to generation
+quality.
+
+It is **experimental**. Known limitations are documented in
+[KNOWN_ISSUES.md](KNOWN_ISSUES.md). Contributions to improve it are very
+welcome.
 
 ---
 
