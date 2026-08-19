@@ -30,7 +30,6 @@ def _read_meta_clock(run_dir: Path) -> float:
 
 app = FastAPI(title="RTL Copilot PD Tools", version="2.0.0")
 
-
 WORK_BASE = "/work"
 PDK_ROOT  = "/pdk/volare/sky130/versions/0fe599b2afb6708d281543108caf8310912f54af/sky130A"
 TEMPLATES  = "/app/templates"
@@ -172,6 +171,9 @@ def render_template(name: str, ctx: dict) -> str:
     return env.get_template(name).render(**ctx)
 
 
+# Expected primary artifact per stage: a stage that exits 0 but produced no
+# (fresh) output file did NOT succeed — e.g. an interactive openroad session
+# swallows script errors and still exits 0. Checked in stream_process.
 STAGE_OUTPUTS = {
     "synthesis": "netlist.v",
     "floorplan": "floorplan.def",
@@ -189,6 +191,18 @@ def stream_process(cmd: list, cwd: str, run_dir: Path, stage: str, meta_extra: d
     """Run subprocess, stream output, update run_meta.json on completion."""
     def generate():
         t0 = time.time()
+        # Freshness marker for the output-artifact check below. Comparing an
+        # output's mtime against time.time() breaks on Windows bind mounts:
+        # file mtimes come from the HOST filesystem while time.time() is the
+        # CONTAINER (WSL2) clock, which drifts after host sleep — fresh files
+        # then look "stale". A marker written at stage start lives on the
+        # same filesystem as the outputs, so both timestamps share one clock.
+        marker = run_dir / (".stage_start_" + stage)
+        try:
+            marker.touch()
+            marker_mtime = marker.stat().st_mtime
+        except OSError:
+            marker_mtime = None
         proc = subprocess.Popen(
             cmd, cwd=cwd,
             stdout=subprocess.PIPE,
@@ -211,9 +225,17 @@ def stream_process(cmd: list, cwd: str, run_dir: Path, stage: str, meta_extra: d
         missing_output = None
         if success and expected:
             out_path = run_dir / expected
-            if not out_path.exists() or out_path.stat().st_mtime < t0 - 1:
+            if not out_path.exists():
                 success = False
                 missing_output = expected
+            elif (marker_mtime is not None
+                  and out_path.stat().st_mtime < marker_mtime - 1):
+                success = False
+                missing_output = expected + " (stale)"
+        try:
+            marker.unlink()
+        except OSError:
+            pass
 
         # Update run metadata
         meta_path = run_dir / "run_meta.json"
@@ -258,14 +280,12 @@ def stream_process(cmd: list, cwd: str, run_dir: Path, stage: str, meta_extra: d
     return StreamingResponse(generate(), media_type="text/plain")
 
 
-# Health
 
 @app.get("/health")
 def health():
     return {"status": "ok", "tools": ["yosys", "openroad", "klayout"], "version": "2.0.0"}
 
 
-# New Run
 
 @app.post("/new_run")
 def new_run(body: dict = {}):
@@ -472,8 +492,6 @@ def floorplan(req: FloorplanConfig):
             )
     tcl_lines.append("place_pins -hor_layers met3 -ver_layers met4")
 
-    # Well-tap + endcap insertion — required by sky130 (li/well continuity).
-    # Omitting it is the root cause of systematic li.* DRC violations.
     if pdk.get("tapcell"):
         tcl_lines += [
             "tapcell \\",
@@ -544,16 +562,14 @@ def pdn(req: PDNConfig):
         "global_connect",
         "set_voltage_domain -power " + req.vdd_net + " -ground " + req.vss_net,
         "define_pdn_grid -name core_grid -voltage_domain {Core}",
-        # met1 followpins — rails at standard-cell row pitch
         "add_pdn_stripe -followpins -layer met1 -width 0.48 -extend_to_core_ring",
-        # Primary vertical straps
         "add_pdn_stripe -layer " + req.straps_layer +
         " -width " + str(req.straps_width) +
         " -pitch " + str(req.straps_pitch) +
         " -offset 12.0 -extend_to_core_ring",
     ]
 
-    # Optional second strap layer — horizontal mesh on top of vertical straps
+    # Optional second strap layer 
     if req.straps_layer2:
         pdn_lines += [
             "add_pdn_stripe -layer " + req.straps_layer2 +
@@ -647,33 +663,32 @@ def placement(req: PlacementConfig):
         "set_wire_rc -clock  -layer met5",
         "set_wire_rc -signal -layer met2",
         "estimate_parasitics -placement",
-        # ── Global placement ──
+        # Global placement 
         "global_placement " + gp_flags,
-        # ── Repair DRC violations (slew, cap, fanout, long wires) ──
+        # Repair DRC violations (slew, cap, fanout, long wires) 
         "estimate_parasitics -placement",
         "repair_design" +
         " -max_wire_length " + str(req.max_wire_length) +
         " -slew_margin "     + str(req.slew_margin) +
         " -cap_margin "      + str(req.cap_margin),
-        # ── First legalization — after repair_design inserts buffers ──
+        # First legalization — after repair_design inserts buffers 
         "if { [catch { detailed_placement } _dp_msg] } {",
         '  puts "WARNING: detailed_placement failed ($_dp_msg) — retrying with relaxed padding"',
         "  set_placement_padding -global -left 1 -right 1",
         "  detailed_placement",
         "}",
-        # ── Repair timing violations ──
+        # Repair timing violations
         "estimate_parasitics -placement",
         "repair_timing -setup -hold" +
         " -setup_margin "    + str(req.setup_margin) +
         " -hold_margin "     + str(req.hold_margin) +
         " -max_utilization " + str(req.max_repair_util),
-        # ── Second legalization — after repair_timing resizes/inserts cells ──
+        #  Second legalization  after repair_timing resizes/inserts cells 
         "if { [catch { detailed_placement } _dp_msg] } {",
         '  puts "WARNING: detailed_placement failed ($_dp_msg) — retrying with relaxed padding"',
         "  set_placement_padding -global -left 1 -right 1",
         "  detailed_placement",
         "}",
-        # ── Final parasitic estimate + reports ──
         "estimate_parasitics -placement",
         "report_design_area",
         "report_worst_slack -max",
@@ -771,9 +786,9 @@ def cts(req: CTSConfig):
         " -sink_clustering_size " + str(req.sink_clustering_size) +
         " -sink_clustering_max_diameter " + str(req.sink_clustering_max_diameter) +
         " -balance_levels",
-        # ── Fix slew/cap violations on clock nets ──
+        #  Fix slew/cap violations on clock nets 
         "repair_clock_nets",
-        # ── Place the inserted clock buffer cells ──
+        #  Place the inserted clock buffer cells 
         # Must happen BEFORE set_propagated_clock so the timing engine has
         # real buffer coordinates when tracing the clock network.
         "if { [catch { detailed_placement } _dp_msg] } {",
@@ -781,20 +796,20 @@ def cts(req: CTSConfig):
         "  set_placement_padding -global -left 1 -right 1",
         "  detailed_placement",
         "}",
-        # ── Switch to propagated-clock analysis with real insertion delays ──
+        #  Switch to propagated-clock analysis with real insertion delays 
         "set_propagated_clock [all_clocks]",
         "estimate_parasitics -placement",
-        # ── Fix hold violations using real propagated-clock skew ──
+        #  Fix hold violations using real propagated-clock skew 
         "repair_timing -hold" +
         " -hold_margin "     + str(req.hold_margin) +
         " -max_utilization " + str(req.max_repair_util),
-        # ── Re-legalise after hold buffers inserted ──
+        #  Re-legalise after hold buffers inserted 
         "if { [catch { detailed_placement } _dp_msg] } {",
         '  puts "WARNING: detailed_placement failed ($_dp_msg) — retrying with relaxed padding"',
         "  set_placement_padding -global -left 1 -right 1",
         "  detailed_placement",
         "}",
-        # ── Final reports ──
+        #  Final reports 
         "estimate_parasitics -placement",
         "report_clock_skew",
         "report_worst_slack -max",
@@ -819,7 +834,7 @@ def cts(req: CTSConfig):
     )
 
 
-# Stage 4: Routing 
+#  Stage 4: Routing 
 
 class RoutingConfig(BaseModel):
     top_module:             str
@@ -929,7 +944,7 @@ def routing(req: RoutingConfig):
     ]
 
     tcl_lines += [
-        # ── Global routing ──
+        #  Global routing 
         "global_route \\",
         "    -guide_file " + str(run_dir / "route.guide") + " \\",
         "    -congestion_iterations " + str(req.congestion_iterations) + " \\",
@@ -939,7 +954,7 @@ def routing(req: RoutingConfig):
         "    -verbose",
         # (congestion is reported via -congestion_report_file above;
         #  check_global_route is an Innovus command and does not exist here)
-        # ── Detailed routing ──
+        #  Detailed routing 
         "detailed_route \\",
         "    -output_drc " + str(run_dir / "route_drc.rpt") + " \\",
         "    -verbose 1",
@@ -1033,7 +1048,7 @@ def routing(req: RoutingConfig):
     )
 
 
-# Stage 4b: RC Extraction / SPEF (OpenROAD) 
+#  Stage 4b: RC Extraction / SPEF (OpenROAD) 
 
 class SPEFConfig(BaseModel):
     top_module:          str
@@ -1102,7 +1117,7 @@ def spef_extract(req: SPEFConfig):
     )
 
 
-# Stage 5: Timing 
+#  Stage 5: Timing (Sign-off STA) 
 
 class TimingConfig(BaseModel):
     top_module:           str
@@ -1216,31 +1231,31 @@ def timing(req: TimingConfig):
     ]
 
     tcl_lines += [
-        # ── Setup (max-delay) checks ──
+        #  Setup (max-delay) checks 
         "# === SETUP TIMING (SS/Cmax corner) ===",
         "report_checks -path_delay max"
         " -digits 3"
         " -group_path_count " + str(req.num_paths),
         "report_wns",
         "report_tns",
-        # ── Hold (min-delay) checks ──
+        #  Hold (min-delay) checks 
         "# === HOLD TIMING (FF/Cmin corner) ===",
         "report_checks -path_delay min"
         " -digits 3"
         " -group_path_count " + str(req.num_paths),
         "report_worst_slack -max",
         "report_worst_slack -min",
-        # ── Non-timing constraint checks ──
+        #  Non-timing constraint checks 
         "# === CONSTRAINT VIOLATIONS ===",
         "report_check_types -max_slew -max_cap -max_fanout -violators",
-        # ── Clock quality ──
+        #  Clock quality 
         "# === CLOCK ANALYSIS ===",
         "report_clock_skew",
         "report_clock_skew -hold",
         "report_clock_min_period -clocks [all_clocks]",
-        # ── Power (activity-factor estimated) ──
+        #  Power (activity-factor estimated) 
         "report_power",
-        # ── PDV sentinels ──
+        #  PDV sentinels 
         'catch { puts "PDV setup_wns_ns [format %.4f [sta::worst_slack -max]]" }',
         'catch { puts "PDV hold_wns_ns  [format %.4f [sta::worst_slack -min]]" }',
         'catch { puts "PDV setup_tns_ns [format %.4f [sta::total_negative_slack -max]]" }',
@@ -1570,7 +1585,7 @@ def drc(req: DRCConfig):
     return _SR(generate(), media_type="text/plain")
 
 
-# Stage 7: LVS (needs more testing)
+#  Stage 7: LVS (Layout vs Schematic) 
 
 class LVSConfig(BaseModel):
     top_module: str
@@ -1750,7 +1765,7 @@ def lvs(req: LVSConfig):
     return StreamingResponse(generate(), media_type="text/plain")
 
 
-# Verification checks 
+#  Verification checks 
 
 @app.get("/verification_policy")
 def get_verification_policy():
@@ -1791,7 +1806,7 @@ def check_stage(run_id: str, stage: str,
     })
 
 
-# Run metadata
+#  Run metadata 
 
 @app.get("/run/{run_id}/meta")
 def get_meta(run_id: str):
