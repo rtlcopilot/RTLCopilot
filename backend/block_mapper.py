@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import port_contract as pc
@@ -538,6 +536,7 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
 
 def map_concepts_to_primitives(
     concepts: list[dict],
+    design_width: int | str = 8,
 ) -> tuple[list[dict] | None, str | None]:
     """
     Map Stage 0 generic concept list to RTLCopilot primitives.
@@ -573,9 +572,28 @@ def map_concepts_to_primitives(
         # it sets the block's data width, but it never decides an individual
         # handle's width. That is the port contract's job.
         try:
-            data_width = max(1, int(str(c.get("width_hint", "8")).strip()))
+            dw_design = max(1, int(str(design_width or 8)))
         except (TypeError, ValueError):
-            data_width = 8
+            dw_design = 8
+        try:
+            data_width = max(1, int(str(c.get("width_hint", dw_design)).strip()))
+        except (TypeError, ValueError):
+            data_width = dw_design
+
+        # A block's data_width is its OPERAND width. For comparison predicates
+        # (eq/lt/gt/...) Stage 0 reliably reports the RESULT width instead —
+        # it sees "produces a flag" and returns width_hint="1". That made a
+        # 16-bit comparator resolve BOTH operands to 1 bit, which is the
+        # `and_operation.out(16) -> equality_comparator.in0(1)` conflict.
+        #
+        # The result width is derived from comb_op by the port contract, so the
+        # hint is not needed for it and is overridden here.
+        if pattern == "comb" and comb_op in pc.COMB_PREDICATE_OPS \
+                and data_width < dw_design:
+            print(f"[MAPPER] '{gtype}' is a predicate — operand width "
+                  f"{data_width} -> {dw_design} (result stays 1 bit)",
+                  flush=True)
+            data_width = dw_design
 
         mux_size = int(c.get("mux_size") or rule.get("mux_size") or 2)
         sr_mode  = str(c.get("sr_mode") or rule.get("sr_mode") or "PISO").upper()

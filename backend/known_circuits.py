@@ -1,3 +1,5 @@
+import re
+
 
 _CIRCUIT_KEYWORDS: dict[str, list[str]] = {
 
@@ -1162,32 +1164,24 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
         "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
     },
 
-    "cdc_sync": {
+        "cdc_sync": {
         "description": "2-Flop CDC Synchronizer",
         "sub_circuits": [
             {
-                "id": "ff1", "name": "ff1", "pattern": "macro_sync",
-                "role": "First synchronization flop — captures metastable signal",
-                "data": {"width": "1"},
-                "imports": [{"signal": "d", "handle": "d", "width": "1", "from": "external"}],
-                "exports": [{"signal": "q", "handle": "q", "width": "1"}],
-                "position": {"x": 200, "y": 200},
-            },
-            {
-                "id": "ff2", "name": "ff2", "pattern": "macro_sync",
-                "role": "Second synchronization flop — resolved stable output",
+                "id": "sync_ff", "name": "sync_ff", "pattern": "macro_sync",
+                "role": "2-flop synchroniser — resolves metastability",
                 "data": {"width": "1"},
                 "imports": [{"signal": "d", "handle": "d", "width": "1",
-                             "from": "ff1", "src_handle": "q"}],
+                             "from": "external"}],
                 "exports": [{"signal": "q", "handle": "q", "width": "1"}],
-                "position": {"x": 500, "y": 200},
+                "position": {"x": 350, "y": 200},
             },
         ],
         "top_level_inputs": [
-            {"name": "async_in", "width": "1", "to": "ff1", "dst_handle": "d"},
+            {"name": "async_in", "width": "1", "to": "sync_ff", "dst_handle": "d"},
         ],
         "top_level_outputs": [
-            {"name": "sync_out", "width": "1", "from": "ff2", "src_handle": "q"},
+            {"name": "sync_out", "width": "1", "from": "sync_ff", "src_handle": "q"},
         ],
         "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
     },
@@ -1722,6 +1716,22 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
 }
 
 
+def _kw_matches(keyword: str, prompt: str) -> bool:
+    """Whole-word keyword match.
+
+    A bare substring test made short keywords fire inside ordinary English:
+    'alu' matched "compares two v(alu)es", handing the user an 8-bit ALU for a
+    12-bit comparator — silently, and the substituted circuit compiled, so
+    nothing downstream flagged it. 'mac' matches "machine" and "macro"; 'nco'
+    matches "encoder". Word boundaries keep "build an ALU" working while
+    ignoring "values".
+
+    The boundary wraps the whole keyword, so multi-word entries such as
+    "arithmetic logic unit" still match as a phrase.
+    """
+    return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", prompt) is not None
+
+
 def get_circuit_key(prompt: str):
     """
     Classify a prompt against known circuit keywords.
@@ -1729,7 +1739,12 @@ def get_circuit_key(prompt: str):
     """
     p = prompt.lower().strip()
     for key, keywords in _CIRCUIT_KEYWORDS.items():
-        if any(kw in p for kw in keywords):
-            if key in _KNOWN_HIERARCHIES:
-                return key, _KNOWN_HIERARCHIES[key]
+        for kw in keywords:
+            if _kw_matches(kw, p):
+                if key in _KNOWN_HIERARCHIES:
+                    # Log why: a wrong match is otherwise invisible, since the
+                    # substituted circuit builds and compiles perfectly well.
+                    print(f"[KC] prompt matched '{key}' on keyword '{kw}'",
+                          flush=True)
+                    return key, _KNOWN_HIERARCHIES[key]
     return None, None

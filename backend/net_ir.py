@@ -1,19 +1,4 @@
-"""
-net_ir.py
-=========
-Canonical Net IR — sits between compileIR() output and emit_verilog.py.
 
-Converts the raw {src, dst, src_port, dst_port} edge graph into a
-structured net model with explicit driver/consumer ownership, widths,
-and signal domains.
-
-Works correctly for all three user types:
-  User 1 — manual circuits: no __ nodes, clean edges
-  User 2 — AI-generated:   __ placeholder nodes, isFsmOutput proxies
-  User 3 — hybrid:         mix of both
-
-The net model is the single source of truth for Verilog emission.
-"""
 
 from __future__ import annotations
 from typing import Any
@@ -94,16 +79,25 @@ def _node_output_wire(node: dict, handle: str, name_map: dict) -> str:
         return m.get(handle, f"{nname}_{handle or 'dout'}")
 
     if ntype == "macro_shiftreg":
+        # Must match emit_verilog's declarations: PISO/SISO declare {n}_sout,
+        # SIPO/PIPO declare {n}_q. Returning a bare {n} for the parallel side
+        # emitted `assign dout = rx_sreg;` against a wire declared as
+        # `rx_sreg_q` — `Unable to bind wire/reg/memory 'rx_sreg'`.
         sr_mode = str(data.get("srMode", "PISO")).upper()
         if sr_mode in ("PISO", "SISO") and handle in ("sout", "out", ""):
             return f"{nname}_sout"
-        return nname
+        return f"{nname}_q"
 
     if ntype == "macro_counter":
         return f"{nname}_count"
 
     if ntype == "macro_sync":
-        return f"{nname}_out"
+        # emit_verilog declares a bare {nname} wire for macro_sync (see the
+        # macro_counter/macro_sync branch in its wire-declaration loop), so
+        # returning {nname}_out referenced a wire that was never declared:
+        # `Unable to bind wire/reg/memory 'ff2_out'`. This only surfaced once
+        # macro_sync stopped being mis-dispatched as a comb node.
+        return nname
 
     if ntype == "macro_edgedet":
         return nname

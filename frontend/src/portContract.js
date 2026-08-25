@@ -136,8 +136,20 @@ function lookupSpec(pattern, handle, direction) {
  * rather than defaulting to 1.
  * Returns undefined when the pattern declares no such handle.
  */
+/**
+ * Stage-0 stand-in handles like <condition_signals>, replaced by Stage 3 with
+ * real signal names. Not ports, so they have no width and must be skipped by
+ * every check — the fsm pattern's "*" wildcard would otherwise resolve them to
+ * 1 bit and report conflicts against a handle that does not exist yet.
+ */
+export function isPlaceholder(handle) {
+  const h = String(handle || "").trim();
+  return h.startsWith("<") && h.endsWith(">");
+}
+
 export function resolveWidth(pattern, handle, direction, nodeData = {}) {
   const pat = String(pattern || "").trim();
+  if (isPlaceholder(handle)) return null;   // unconstrained
   const h = canonical(handle, pat);
   const dw = intOr(nodeData.width, 8);
   const aw = intOr(nodeData.addrWidth, 6);

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useRef } from "react";
 import { T } from "../constants";
 import { API_BASE } from "../config";
 
@@ -18,7 +18,12 @@ const AiSidebar = ({
 
   const hasDesign = nodes.length > 0;
 
+  // The circuit request that is waiting on a clarification answer. A ref
+  // rather than state: it must survive re-renders but never trigger one.
+  const pendingClarifyRef = useRef(null);
+
   const handleNewCircuit = () => {
+    pendingClarifyRef.current = null;
     setNodes([]);
     setEdges([]);
     setChatHistory([]);
@@ -29,9 +34,16 @@ const AiSidebar = ({
 
   const handleSend = async () => {
     if (!promptValue.trim()) return;
-    const currentPrompt = promptValue;
+    // When Stage 0 asks for missing design parameters, the user's reply is an
+    // ANSWER, not a new circuit request. Sending it alone made the backend
+    // decompose the answer itself — "32-bit address width" became a register.
+    // Carry the original request forward so the model sees both.
+    const pendingReq = pendingClarifyRef.current;
+    const currentPrompt = pendingReq
+      ? `${pendingReq}\n\nAnswers to your questions:\n${promptValue}`
+      : promptValue;
     setAiLoading(true);
-    setChatHistory((p) => [...p, { role: "user", text: currentPrompt }]);
+    setChatHistory((p) => [...p, { role: "user", text: promptValue }]);
     setPromptValue("");
     try {
       const headers = await _authHeaders();
@@ -76,6 +88,7 @@ const AiSidebar = ({
           });
           setChatHistory((p) => [...p, { role: "assistant", text: d.explanation || "Canvas updated." }]);
         } else if (d.nodes && d.nodes.length > 0) {
+          pendingClarifyRef.current = null;
           const hydratedNodes = d.nodes.map((n) => hydrateNode(n));
           const hydratedEdges = d.edges.map((e) => ({
             ...e, type: e.data?.isFsm ? "fsm" : "smoothstep", animated: false,
@@ -83,7 +96,13 @@ const AiSidebar = ({
           setNodes(hydratedNodes);
           setTimeout(() => setEdges(hydratedEdges), 100);
 
-          if (d.verilog_files && Object.keys(d.verilog_files).length > 0) {
+          if (d.compile_failed) {
+            // Draft: the blocks are worth showing so the user can see and fix
+            // the structure, but the Verilog does not compile — so RTL export
+            // stays disabled. Broken output must never look finished.
+            setVerilogFiles({});
+            setRtlReady(false);
+          } else if (d.verilog_files && Object.keys(d.verilog_files).length > 0) {
             setVerilogFiles(d.verilog_files);
             setActiveRtlFile("top.v");
             setRtlReady(true);
@@ -92,11 +111,20 @@ const AiSidebar = ({
             setCanonicalIR(d.compile_ir);
           }
 
-          const issueText = d.ir_issues && d.ir_issues.length > 0
+          const issueText = (!d.compile_failed && d.ir_issues && d.ir_issues.length > 0)
             ? `\n\n⚠️ IR issues detected:\n${d.ir_issues.map((i) => `• ${i}`).join("\n")}`
             : "";
-          setChatHistory((p) => [...p, { role: "assistant", text: (d.explanation || "Circuit built.") + issueText }]);
+          setChatHistory((p) => [...p, {
+            role: "assistant",
+            text: (d.explanation || "Circuit built.") + issueText,
+            isDraft: !!d.compile_failed,
+          }]);
+        } else if (d.clarification_needed) {
+          // Hold the request open until the user answers.
+          pendingClarifyRef.current = currentPrompt;
+          setChatHistory((p) => [...p, { role: "assistant", text: d.explanation || "I need a bit more information." }]);
         } else {
+          pendingClarifyRef.current = null;
           setChatHistory((p) => [...p, { role: "assistant", text: d.explanation || "Could not generate a valid circuit." }]);
         }
       }

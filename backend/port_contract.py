@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import math
@@ -34,6 +32,17 @@ PATTERN_ALIASES: dict[tuple[str, str], str] = {
     ("macro_sync",     "out"): "q",
     ("reg",            "out"): "q",
 }
+
+
+def is_placeholder(handle: str) -> bool:
+    """True for Stage-0 stand-in handles like <condition_signals>.
+
+    These are filled in by Stage 3 with real signal names. Until then they must
+    be excluded from every width and connectivity check — treating them as real
+    1-bit ports produces conflicts nothing can fix.
+    """
+    h = str(handle or "").strip()
+    return h.startswith("<") and h.endswith(">")
 
 
 def canonical(handle: str, pattern: str | None = None) -> str:
@@ -212,6 +221,18 @@ def resolve_width(
     handle  = canonical(handle, pattern)
     dw      = max(1, int(data_width or 1))
     aw      = max(1, int(addr_width or 1))
+
+    # Placeholder handles (<condition_signals>, <fsm_output_signals>) are
+    # stand-ins that Stage 3 replaces with real signal names. They are not
+    # ports and have no width.
+    #
+    # The FSM pattern declares {"*": ONE}, so the wildcard matched these and
+    # resolved them to 1 bit — which made the assembler report
+    #   WIDTH CONFLICT fifo.dout(32) -> ctrl.<condition_signals>(1)
+    # against a handle that does not exist yet. Retrying Stage 1 could never
+    # clear it, so every multi-FSM design failed validation on a phantom.
+    if is_placeholder(handle):
+        return None
 
     found, spec = _lookup_spec(pattern, handle, direction)
     if not found:

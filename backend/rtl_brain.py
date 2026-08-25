@@ -1,7 +1,9 @@
-
-
 from __future__ import annotations
 
+import asyncio
+import cosim as _cosim
+import datetime as _dt
+import os
 import json
 import re
 import math
@@ -99,6 +101,250 @@ def _build_stage0_vocabulary() -> str:
     return get_stage0_vocabulary_prompt()
 
 
+# Set when Stage 0's LLM call fails for a reason the user can fix in Settings
+# (bad key, wrong provider, retired model ID) rather than a model-quality
+# problem. Without this, all three surface as "couldn't decompose your request".
+# Datapath control handles that an FSM drives. Stage 1 is forbidden from
+# wiring these; _rtl_brain_autowire_fsm connects them from FSM outputs.
+_FSM_OWNED_HANDLES = {"en", "load", "wr_en", "rd_en", "res"}
+
+# Comparison operators Stage 0 may request via a concept's compare_op field.
+_VALID_COMPARE_OPS = {"eq", "neq", "gt", "lt", "gte", "lte"}
+
+
+def _apply_compare_ops(concepts: list, mapped: list) -> list:
+    """Honour Stage 0's compare_op on comparator-class blocks.
+
+    block_mapper maps every 'comparator' to comb_op=eq, because that is what
+    the word means in isolation. But a peak detector asks for a comparator and
+    means '>'; the emitted design then compared for equality and silently
+    became a sample register. The vocabulary name and the operation were fixed
+    to each other with no way for the request to influence it.
+
+    Stage 0 now names the operator, and it is applied here so neither
+    block_mapper nor prompts.py needs to change.
+    """
+    by_id = {}
+    for c in concepts or []:
+        cid = c.get("suggested_id") or c.get("generic_type")
+        op = str(c.get("compare_op", "")).lower().strip()
+        if cid and op in _VALID_COMPARE_OPS:
+            by_id[cid] = op
+    for m in mapped or []:
+        want = by_id.get(m.get("id"))
+        if want and m.get("pattern") == "comb" and m.get("comb_op") != want:
+            print(f"[MAPPER] '{m['id']}' compare_op: "
+                  f"{m.get('comb_op')} -> {want} (from Stage 0)", flush=True)
+            m["comb_op"] = want
+    return mapped
+
+_stage0_config_error: str | None = None
+
+
+def _set_config_error(msg: str) -> None:
+    global _stage0_config_error
+    _stage0_config_error = msg
+
+
+# ── rate-limit aware LLM call ───────────────────────────────────────────────
+# Free tiers meter tokens per MINUTE, but this pipeline fires 3-4 sequential
+# calls within seconds, so one generation can exhaust a whole minute's budget
+# partway through and fail at Stage 1 or 2 having already done the work of
+# Stage 0.
+#
+# Providers say exactly how long to wait ("Please try again in 22.95s"), and
+# retrying immediately — as the pipeline used to — guarantees a second failure
+# and burns the retry allowance for nothing. Waiting is slower but finishes.
+
+_RETRY_AFTER_RE = re.compile(r"try again in\s+([0-9.]+)\s*s", re.I)
+_MAX_RATE_LIMIT_WAIT = float(os.environ.get("LLM_MAX_RATE_WAIT", "75"))
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Seconds the provider asked us to wait, or None if not a rate limit."""
+    name, msg = type(exc).__name__, str(exc)
+    if "RateLimit" not in name and "429" not in msg and "rate_limit" not in msg:
+        return None
+    hdrs = getattr(getattr(exc, "response", None), "headers", None) or {}
+    for key in ("retry-after", "x-ratelimit-reset-tokens"):
+        raw = hdrs.get(key)
+        if raw:
+            try:
+                return float(str(raw).rstrip("s"))
+            except (TypeError, ValueError):
+                pass
+    m = _RETRY_AFTER_RE.search(msg)
+    return float(m.group(1)) if m else 5.0
+
+
+async def _llm_create(llm, *, stage: str = "?", **kwargs):
+    """chat.completions.create with rate-limit backoff.
+
+    Sleeps for the interval the provider specifies rather than retrying blind.
+    Any non-rate-limit error is raised immediately — a bad key or a retired
+    model will not fix itself by waiting.
+    """
+    for attempt in range(3):
+        try:
+            return llm.chat.completions.create(**kwargs)
+        except Exception as e:
+            wait = _retry_after_seconds(e)
+            if wait is None or attempt == 2:
+                raise
+            if wait > _MAX_RATE_LIMIT_WAIT:
+                print(f"[{stage}] rate limited, provider wants {wait:.0f}s "
+                      f"(over the {_MAX_RATE_LIMIT_WAIT:.0f}s cap) — giving up",
+                      flush=True)
+                raise
+            print(f"[{stage}] rate limited — waiting {wait:.1f}s as the "
+                  f"provider asked (attempt {attempt + 1}/3)", flush=True)
+            await asyncio.sleep(wait + 1.0)
+    raise RuntimeError("unreachable")
+
+def _draft_explanation(base: str, ir_issues: list, compile_err: str,
+                       dump_path: str | None) -> str:
+    """Plain-language account of what the tool is unsure about.
+
+    Built from the IR checks and the compiler output rather than another LLM
+    call — the findings are already known precisely, and a model asked to
+    describe them could only add noise (and consume rate-limit budget).
+    """
+    lines = [base.strip() or "I built a draft of this circuit.", ""]
+    lines.append("**This draft does not compile yet, so I have not enabled "
+                 "RTL export.** The blocks are on your canvas so you can see "
+                 "the structure and fix the problems below.")
+
+    widths, drivers, floating, others = [], [], [], []
+    for issue in ir_issues or []:
+        t = str(issue)
+        (widths if "WIDTH MISMATCH" in t else
+         drivers if "MULTIPLE DRIVERS" in t else
+         floating if "DISCONNECTED" in t else others).append(t)
+
+    if widths:
+        lines += ["", "**Widths I'm unsure about** — these connections carry a "
+                      "different number of bits at each end. Usually one block's "
+                      "width parameter is wrong, or the wrong output handle was "
+                      "wired:"]
+        lines += [f"  - {w.split(':', 1)[-1].strip()}" for w in widths[:6]]
+    if drivers:
+        lines += ["", "**Inputs driven from two places** — pick one source and "
+                      "delete the other edge. A pin can only have one driver:"]
+        lines += [f"  - {d.split(':', 1)[-1].strip()}" for d in drivers[:6]]
+    if floating:
+        lines += ["", "**Outputs nothing reads** — either wire them onward or "
+                      "remove the block:"]
+        lines += [f"  - {f.split(':', 1)[-1].strip()}" for f in floating[:6]]
+    if others:
+        lines += ["", "**Other issues:**"]
+        lines += [f"  - {o}" for o in others[:4]]
+
+    errs = [l.strip() for l in str(compile_err).splitlines() if l.strip()][:4]
+    if errs:
+        lines += ["", "**The Verilog compiler reported:**"]
+        lines += [f"  - {e}" for e in errs]
+
+    lines += ["", "Fix these on the canvas and press **DRC Test**, then "
+                  "generate RTL again."]
+    if dump_path:
+        lines += ["", f"_The non-compiling Verilog was saved to {dump_path} "
+                      f"for inspection._"]
+    return "\n".join(lines)
+
+# ── Stage V — behavioural equivalence ───────────────────────────────────────
+
+_STAGE_V_SYSTEM = (
+    "You write behavioural Verilog-2001 reference models.\n\n"
+    "Given a circuit description and an exact port list, output ONE module\n"
+    "named ref_model implementing the description directly with always/assign\n"
+    "blocks. Do NOT instantiate anything. Do NOT add or rename ports.\n\n"
+    "Output ONLY Verilog source. No markdown fences, no commentary."
+)
+
+
+def _ports_from_result(result: dict) -> tuple[list, list, bool, str | None]:
+    """Port lists for co-simulation, taken from the emitted top module.
+
+    Reading the real port list (rather than the hierarchy's intent) guarantees
+    the reference model is built against exactly what the design exposes.
+    """
+    ins, outs, has_clk, rst = [], [], False, None
+    for p in result.get("ports", []) or []:
+        name = str(p.get("name", "")).strip()
+        if not name:
+            continue
+        try:
+            w = int(str(p.get("width", "1")).strip())
+        except (TypeError, ValueError):
+            w = 1                    # parameterised width — treat as 1 for stimulus
+        low = name.lower()
+        if low in ("clk", "clock"):
+            has_clk = True
+            continue
+        if low in ("rst", "reset", "rst_n", "resetn"):
+            rst = name
+            continue
+        (ins if p.get("dir") == "input" else outs).append(
+            {"name": name, "width": max(1, w)})
+    return ins, outs, has_clk, rst
+
+
+async def _stage_v_equivalence(prompt: str, result: dict, llm, model) -> dict:
+    """Check the design against a reference derived from the PROMPT.
+
+    Every other check in the pipeline derives its expectations from the design
+    itself, so a design that is internally consistent but is the wrong circuit
+    passes them all. This is the only check with an independent source of
+    truth, which is exactly why it can catch a peak detector that compares for
+    equality instead of magnitude.
+    """
+    if not _cosim.iverilog_available():
+        return {"status": "skipped", "reason": "iverilog not on PATH"}
+    vf = result.get("verilog_files") or {}
+    if "top.v" not in vf:
+        return {"status": "skipped", "reason": "no top.v"}
+
+    ins, outs, has_clk, rst = _cosim.ports_from_verilog(vf["top.v"])
+    if not ins or not outs:
+        return {"status": "skipped", "reason": "no comparable ports"}
+
+    decls = []
+    if has_clk:
+        decls.append("input clk")
+    if rst:
+        decls.append(f"input {rst}")
+    for p in ins:
+        decls.append(f"input [{p['width']-1}:0] {p['name']}"
+                     if p["width"] > 1 else f"input {p['name']}")
+    for p in outs:
+        decls.append(f"output reg [{p['width']-1}:0] {p['name']}"
+                     if p["width"] > 1 else f"output reg {p['name']}")
+
+    user = (f"Circuit description:\n{prompt}\n\n"
+            f"Implement exactly this module header:\n\n"
+            f"module ref_model(\n    " + ",\n    ".join(decls) + "\n);\n\n"
+            + (f"Reset is {rst}, active high, synchronous.\n" if rst else "")
+            + "Write the behaviour the description asks for.")
+
+    try:
+        resp = await _llm_create(
+            llm, stage="RTL_BRAIN SV", model=model,
+            messages=[{"role": "system", "content": _STAGE_V_SYSTEM},
+                      {"role": "user", "content": user}],
+            temperature=0.0, max_tokens=1500)
+        src = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        return {"status": "skipped", "reason": f"reference model call failed: {e}"}
+
+    src = re.sub(r"^```[a-zA-Z]*\n?|```$", "", src, flags=re.M).strip()
+    if "module ref_model" not in src:
+        return {"status": "skipped", "reason": "reference model malformed"}
+
+    verdict = _cosim.compare(vf, src, ins, outs,
+                             has_clk=has_clk, reset_name=rst)
+    verdict["reference_source"] = src
+    return verdict
+
 async def _rtl_brain_stage0(prompt: str, width_hint: str, llm=None, model=None) -> tuple:
     """
     Stage 0 — Generic decomposition.
@@ -121,22 +367,39 @@ async def _rtl_brain_stage0(prompt: str, width_hint: str, llm=None, model=None) 
         "Decompose this circuit into generic functional blocks.\n"
         "Use ONLY generic_type values from the vocabulary above.\n"
         "For each FSM/control/sequencing block, include fsm_states and fsm_outputs.\n"
+        "COMPARISONS: 'comparator' defaults to EQUALITY (==). If the circuit\n"
+        "needs a magnitude comparison — maximum, minimum, larger, smaller,\n"
+        "exceeds, above, below, at least — you MUST add a \"compare_op\" field\n"
+        "to that block with one of: eq, neq, gt, lt, gte, lte. A peak detector\n"
+        "needs compare_op=gt; a floor detector needs lt.\n"
         "Output the JSON now:"
     )
     try:
-        resp = llm.chat.completions.create(
+        resp = await _llm_create(llm, stage="RTL_BRAIN S0",
             model=model,
             messages=[
                 {"role": "system", "content": _RTL_BRAIN_STAGE0_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
             temperature=0.0,
-            max_tokens=1000,
+            max_tokens=3000,   # Stage 0 — reasoning models need headroom
         )
         raw  = resp.choices[0].message.content.strip()
         data = _rtl_brain_extract_json(raw)
         if not data:
-            print("[RTL_BRAIN S0] JSON parse failed", flush=True)
+            # A response that ends mid-token was cut off by max_tokens, not
+            # malformed by the model. Saying "parse failed" sends you looking
+            # at the prompt when the fix is the token budget.
+            _fin = getattr(resp.choices[0], "finish_reason", None)
+            if _fin == "length":
+                print("[RTL_BRAIN S0] Response TRUNCATED (hit max_tokens) — "
+                      "raise the Stage 0 budget", flush=True)
+                _set_config_error(
+                    "The model's reply was cut off before it finished. The "
+                    "token budget for this stage is too small for the "
+                    "selected model.")
+            else:
+                print("[RTL_BRAIN S0] JSON parse failed", flush=True)
             print(f"[RTL_BRAIN S0] Raw: {raw[:300]}", flush=True)
             return None, None
 
@@ -159,7 +422,18 @@ async def _rtl_brain_stage0(prompt: str, width_hint: str, llm=None, model=None) 
             print(f"  {c.get('suggested_id')} = {c.get('generic_type')}", flush=True)
         return concepts, None
 
-    except Exception:
+    except Exception as e:
+        global _stage0_config_error
+        _n, _m = type(e).__name__, str(e)
+        if "Authentication" in _n or "invalid_api_key" in _m or "401" in _m:
+            _stage0_config_error = ("The provider rejected the API key (401). "
+                "The key does not match the selected provider's endpoint.")
+        elif "NotFound" in _n or "model_not_found" in _m or "does not exist" in _m:
+            _stage0_config_error = ("The provider does not recognise the "
+                "selected model. Hosted providers retire model IDs.")
+        elif "429" in _m or "rate" in _m.lower():
+            _stage0_config_error = ("The provider refused the request "
+                "(rate limit or quota exhausted).")
         _tb.print_exc()
         return None, None
 
@@ -212,7 +486,8 @@ def _concepts_to_stage1_constraint(mapped_concepts: list) -> str:
 
 
 async def _rtl_brain_stage1(
-    prompt: str, width_hint: str, mapped_concepts: list, llm=None, model=None
+    prompt: str, width_hint: str, mapped_concepts: list, llm=None, model=None,
+    temperature: float = 0.0
 ) -> dict | None:
     """
     Stage 1 — Wiring + parameters only.
@@ -242,14 +517,18 @@ async def _rtl_brain_stage1(
                 raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
             llm = _llm_client
         if model is None: model = _LLM_MODEL
-        resp = llm.chat.completions.create(
+        resp = await _llm_create(llm, stage="RTL_BRAIN S1",
             model=model,
             messages=[
                 {"role": "system", "content": _RTL_BRAIN_STAGE1_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
-            temperature=0.0,
-            max_tokens=2000,
+            # A retry at temperature 0 returns the identical answer, so
+            # feeding the errors back changes nothing. The caller raises
+            # this on retry to let the model explore a different wiring.
+            temperature=temperature,
+            max_tokens=4000,   # Stage 1 — providers reserve this against
+                               # the TPM budget, so keep it tight
         )
         raw  = resp.choices[0].message.content.strip()
         data = _rtl_brain_extract_json(raw)
@@ -752,14 +1031,14 @@ async def _rtl_brain_stage2(hierarchy: dict, llm=None, model=None) -> dict:
         llm = _llm_client
     if model is None: model = _LLM_MODEL
     try:
-        resp = llm.chat.completions.create(
+        resp = await _llm_create(llm, stage="RTL_BRAIN S2",
             model=model,
             messages=[
                 {"role": "system", "content": _RTL_BRAIN_STAGE2_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
             temperature=0.0,
-            max_tokens=1500,
+            max_tokens=4000,   # Stage 2 — signal list
         )
         raw  = resp.choices[0].message.content.strip()
         data = _rtl_brain_extract_json(raw)
@@ -959,14 +1238,14 @@ async def _rtl_brain_stage3_fsm(sc_id: str, sc: dict,
                 raise HTTPException(status_code=403, detail={"code": "byok_required", "message": "No API key set. Please enter your API key in Settings."})
             llm = _llm_client
         if model is None: model = _LLM_MODEL
-        resp = llm.chat.completions.create(
+        resp = await _llm_create(llm, stage="RTL_BRAIN S3",
             model=model,
             messages=[
                 {"role": "system", "content": _RTL_BRAIN_STAGE3_SYSTEM},
                 {"role": "user",   "content": user_msg},
             ],
             temperature=0.0,
-            max_tokens=1200,
+            max_tokens=4000,   # Stage 3 — FSM transition table
         )
         raw  = resp.choices[0].message.content.strip()
         data = _rtl_brain_extract_json(raw)
@@ -1020,12 +1299,17 @@ def _rtl_brain_validate(hierarchy: dict) -> list[str]:
 
 
     for wc in hierarchy.get("width_conflicts", []):
+        if str(wc.get("dst_handle", "")).startswith("<") or \
+           str(wc.get("src_handle", "")).startswith("<"):
+            continue          # placeholder, not a real port
         errors.append(
             f"[{wc['dst']}] width conflict: {wc['src']}.{wc['src_handle']} is "
             f"{wc['src_width']}-bit but {wc['dst_handle']} expects "
             f"{wc['dst_width']}-bit")
 
     sc_ids = {sc.get("id") for sc in hierarchy.get("sub_circuits", [])}
+    _has_fsm = any(sc.get("pattern") == "fsm"
+                   for sc in hierarchy.get("sub_circuits", []))
     driven = {(sc.get("id"), imp.get("handle"))
               for sc in hierarchy.get("sub_circuits", [])
               for imp in sc.get("imports", [])}
@@ -1045,8 +1329,19 @@ def _rtl_brain_validate(hierarchy: dict) -> list[str]:
         except Exception:
             req = []
         for handle in req:
-            if (sc_id, handle) not in driven:
-                errors.append(f"[{sc_id}] required input '{handle}' is not driven")
+            if (sc_id, handle) in driven:
+                continue
+            # Control handles are deliberately stripped from Stage 1's view
+            # ("[S1_CONSTRAINT] Stripped FSM-owned handles") because an FSM
+            # owns them, and _rtl_brain_autowire_fsm connects them afterwards.
+            # Reporting them as undriven asks Stage 1 to wire handles it was
+            # explicitly forbidden to wire — an instruction it cannot satisfy.
+            # With an FSM present these are a warning, not a failure.
+            if handle in _FSM_OWNED_HANDLES and _has_fsm:
+                print(f"[VALIDATE] note: {sc_id}[{handle}] undriven — expected "
+                      f"to come from an FSM output", flush=True)
+                continue
+            errors.append(f"[{sc_id}] required input '{handle}' is not driven")
 
         for imp in sc.get("imports", []):
             frm = imp.get("from", "external")
@@ -1073,9 +1368,15 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
     """
 
     state.reset_request_state()
+    global _stage0_config_error
+    _stage0_config_error = None
 
     print(f"\n{'='*60}", flush=True)
     print(f"[RTL_BRAIN] REQUEST: {prompt}", flush=True)
+    # Which endpoint and model are actually being called. Without this, a wrong
+    # provider, a retired model ID and a bad key all look identical in the log.
+    print(f"[RTL_BRAIN] Provider: {getattr(llm, 'base_url', '?')} | "
+          f"model: {model or '(server default)'} | byok: {byok}", flush=True)
     print(f"[RTL_BRAIN] Width hint: {width_hint}-bit", flush=True)
     print(f"{'='*60}", flush=True)
 
@@ -1110,6 +1411,17 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
         if clarification:
             return {"explanation": clarification, "nodes": [], "edges": [],
                     "clarification_needed": True}
+    if _stage0_config_error:
+        raise _GenFail(
+            stage="LLM configuration",
+            reason=_stage0_config_error,
+            suggestions=[
+                "Open Settings (key icon) and check the provider, model and "
+                "API key all belong together.",
+                "A key issued by one provider will not authenticate against "
+                "another provider's endpoint.",
+            ])
+
     if not raw_concepts:
         raise _GenFail(
             stage="Stage 0 (decomposition)",
@@ -1122,7 +1434,9 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
 
 
     print("\n[RTL_BRAIN] Python Mapper — generic → primitives...", flush=True)
-    mapped_concepts, map_error = map_concepts_to_primitives(raw_concepts)
+    mapped_concepts, map_error = map_concepts_to_primitives(
+        raw_concepts, design_width=width_hint)
+    mapped_concepts = _apply_compare_ops(raw_concepts, mapped_concepts)
 
     if map_error:
         print(f"[RTL_BRAIN] Mapper needs clarification: {map_error[:80]}", flush=True)
@@ -1171,17 +1485,95 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
 
     errors = _rtl_brain_validate(hierarchy)
     if errors:
-        print(f"[RTL_BRAIN] Validation failed: {errors} — retrying Stage 1 "
-              f"with the errors fed back", flush=True)
-        retry_prompt = (
-            f"{prompt}\n\nYour previous wiring produced these errors — fix them:\n"
-            + "\n".join(f"  - {e}" for e in errors))
-        stage1_out = await _rtl_brain_stage1(
-            retry_prompt, width_hint, mapped_concepts, llm=llm, model=model)
-        if stage1_out:
-            hierarchy = _rtl_brain_autowire_fsm(
-                _rtl_brain_assemble(mapped_concepts, stage1_out))
-            errors = _rtl_brain_validate(hierarchy)
+        # Route the retry to the stage that OWNS the failure.
+        #
+        # 'FSM missing fsm_states' is a Stage 0 defect: the state list is part
+        # of the decomposition, not the wiring. Retrying Stage 1 for it — which
+        # is all this used to do — could never fix the problem, so the retry
+        # burned a call and the generation failed anyway. Wiring errors do
+        # belong to Stage 1.
+        s0_errors = [e for e in errors
+                     if "missing fsm_states" in e or "missing fsm_outputs" in e]
+        s1_errors = [e for e in errors if e not in s0_errors]
+
+        if s0_errors:
+            print(f"[RTL_BRAIN] Validation failed on DECOMPOSITION: "
+                  f"{s0_errors} — retrying Stage 0", flush=True)
+            fix_prompt = (
+                f"{prompt}\n\nYour previous decomposition was incomplete:\n"
+                + "\n".join(f"  - {e}" for e in s0_errors)
+                + "\n\nEvery state_machine / handshake_controller / "
+                  "protocol_controller / arbiter / sequencer block MUST include "
+                  "a non-empty fsm_states list and an fsm_outputs list.")
+            retry_concepts, _clar = await _rtl_brain_stage0(
+                fix_prompt, width_hint, llm=llm, model=model)
+            if retry_concepts:
+                remapped, remap_err = map_concepts_to_primitives(
+                    retry_concepts, design_width=width_hint)
+                if remapped and not remap_err:
+                    mapped_concepts = remapped
+                    stage1_out = await _rtl_brain_stage1(
+                        prompt, width_hint, mapped_concepts,
+                        llm=llm, model=model)
+                    if stage1_out:
+                        hierarchy = _rtl_brain_autowire_fsm(
+                            _rtl_brain_assemble(mapped_concepts, stage1_out))
+                        errors = _rtl_brain_validate(hierarchy)
+        elif s1_errors:
+            print(f"[RTL_BRAIN] Validation failed on WIRING: {s1_errors} — "
+                  f"retrying Stage 1 with the errors fed back", flush=True)
+            retry_prompt = (
+                f"{prompt}\n\nYour previous wiring produced these errors — fix "
+                f"them. Every listed input MUST end up driven, either by "
+                f"another block's output or by a top-level input port:\n"
+                + "\n".join(f"  - {e}" for e in s1_errors))
+            stage1_out = await _rtl_brain_stage1(
+                retry_prompt, width_hint, mapped_concepts, llm=llm, model=model,
+                temperature=0.4)
+            if stage1_out:
+                hierarchy = _rtl_brain_autowire_fsm(
+                    _rtl_brain_assemble(mapped_concepts, stage1_out))
+                errors = _rtl_brain_validate(hierarchy)
+
+            # If the same errors survive, Stage 1 is not the problem: the
+            # decomposition is missing a block. "required input 'd' is not
+            # driven" on a peak detector means Stage 0 produced a comparator
+            # and a register but no mux — there is nothing that COULD drive it,
+            # so no amount of rewiring will help. Escalate to Stage 0.
+            if errors and set(errors) == set(s1_errors):
+                print(f"[RTL_BRAIN] Same errors after rewiring — the "
+                      f"decomposition is likely incomplete. Retrying Stage 0.",
+                      flush=True)
+                fix_prompt = (
+                    f"{prompt}\n\nA previous decomposition could not be wired "
+                    f"up. These inputs had nothing available to drive them:\n"
+                    + "\n".join(f"  - {e}" for e in errors)
+                    + "\n\nInclude every block the datapath needs. A value that "
+                      "is conditionally updated needs a multiplexer to choose "
+                      "between the old and new value. A block's data input must "
+                      "come from somewhere.")
+                more, _clar2 = await _rtl_brain_stage0(
+                    fix_prompt, width_hint, llm=llm, model=model)
+                if more:
+                    remapped, rerr = map_concepts_to_primitives(
+                        more, design_width=width_hint)
+                    remapped = _apply_compare_ops(more, remapped)
+                    if remapped and not rerr:
+                        mapped_concepts = remapped
+                        stage1_out = await _rtl_brain_stage1(
+                            prompt, width_hint, mapped_concepts,
+                            llm=llm, model=model)
+                        if stage1_out:
+                            hierarchy = _rtl_brain_autowire_fsm(
+                                _rtl_brain_assemble(mapped_concepts, stage1_out))
+                            errors = _rtl_brain_validate(hierarchy)
+
+        if errors:
+            # Log what survived the retry. Previously these only reached the
+            # user's chat window, so the terminal showed the first round's
+            # errors and nothing about why the retry did not help.
+            print(f"[RTL_BRAIN] Validation STILL failing after retry: "
+                  f"{errors}", flush=True)
     if errors:
         raise _GenFail(
             stage="hierarchy validation",
@@ -1301,15 +1693,86 @@ async def _run_rtl_brain(prompt: str, width_hint: str, current_user: str, llm=No
 
     ok, err = await _iverilog_compile_check(vf)
     if not ok:
-        raise _GenFail(
-            stage="Verilog compile check",
-            reason="The generated Verilog does not compile, so I'm not putting "
-                   "it on your canvas.",
-            details=[l for l in str(err).splitlines() if l.strip()][:8],
-            suggestions=["This is a tool-side defect — the thumbs-down button "
-                         "sends it to us with the design attached.",
-                         "A simpler phrasing of the same circuit often avoids "
-                         "the path that broke."])
+        # Blocking the canvas is right — bad Verilog should not look like a
+        # success. But discarding it leaves nobody able to debug the failure,
+        # so write it out and quote the offending lines. The gate protects the
+        # user; the dump serves whoever has to fix the emitter.
+        dump_dir = BACKEND_DIR / "failed_generations"
+        dump_note = ""
+        try:
+            dump_dir.mkdir(exist_ok=True)
+            stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            run_dir = dump_dir / f"{stamp}_{circuit_key[:40]}"
+            run_dir.mkdir(exist_ok=True)
+            for fname, text in vf.items():
+                (run_dir / fname).write_text(text, encoding="utf-8")
+            (run_dir / "_error.txt").write_text(
+                f"prompt: {prompt}\n\niverilog:\n{err}\n", encoding="utf-8")
+            dump_note = str(run_dir)
+            print(f"[RTL_BRAIN] Non-compiling Verilog written to {run_dir}",
+                  flush=True)
+        except Exception as _e:
+            print(f"[RTL_BRAIN] could not write failure dump: {_e}", flush=True)
+
+        # Echo the lines iverilog objected to, so the log alone is often enough.
+        try:
+            import re as _re
+            top = vf.get("top.v", "")
+            lines = top.split("\n")
+            for _m in _re.finditer(r"top\.v:(\d+):", str(err)):
+                n = int(_m.group(1))
+                lo, hi = max(0, n - 4), min(len(lines), n + 2)
+                print(f"[RTL_BRAIN] --- top.v around line {n} ---", flush=True)
+                for i in range(lo, hi):
+                    mark = ">>" if i == n - 1 else "  "
+                    print(f"[RTL_BRAIN] {mark} {i+1:4}| {lines[i]}", flush=True)
+                break
+        except Exception:
+            pass
+
+        # Return the design as a DRAFT rather than discarding it.
+        #
+        # Blocking the canvas entirely protected the user from trusting broken
+        # output, but it also threw away nine correctly-placed blocks and left
+        # nothing to fix. The middle ground: show the circuit, say plainly what
+        # is wrong with it, and refuse to hand over RTL until it is fixed.
+        #
+        # The distinction that matters is that broken output must never look
+        # finished. It is labelled, the defects are listed, and rtl_ready stays
+        # false so nobody exports Verilog that does not compile.
+        result["compile_failed"] = True
+        result["rtl_ready"]      = False
+        result.pop("verilog_files", None)
+        result["failed_verilog_path"] = dump_note or None
+        result["explanation"] = _draft_explanation(
+            result.get("explanation", ""), result.get("ir_issues", []), err,
+            dump_note)
+        print("[RTL_BRAIN] Returning DRAFT circuit (does not compile) — "
+              "canvas populated, RTL export disabled", flush=True)
+        return result
+
+    # ── Stage V: does it do what was asked? ────────────────────────────────
+    if os.environ.get("RTL_BRAIN_EQUIV_CHECK", "1") != "0":
+        try:
+            eq = await _stage_v_equivalence(prompt, result, llm, model)
+        except Exception as _e:
+            eq = {"status": "skipped", "reason": f"{type(_e).__name__}: {_e}"}
+        result["equivalence"] = {k: v for k, v in eq.items()
+                                 if k != "reference_source"}
+        print(f"[RTL_BRAIN SV] equivalence: {eq.get('status')} "
+              f"{eq.get('reason', '')}", flush=True)
+        if eq.get("status") == "mismatch":
+            # Not an error: the reference may be the wrong one. The design goes
+            # on canvas so the engineer can adjudicate, but RTL export is held
+            # back because the tool cannot vouch for it.
+            result["rtl_ready"] = False
+            result["verilog_files"] = vf
+            result["explanation"] = (
+                (result.get("explanation", "") or "").strip()
+                + "\n\n" + _cosim.describe(eq))
+            for d in eq.get("divergences", [])[:3]:
+                print(f"[RTL_BRAIN SV]   step {d['step']} in={d['inputs']} "
+                      f"out={d['outputs']}", flush=True)
 
     if not result.get("ir_issues"):
         print(f"[RTL_BRAIN] iverilog clean — caching as '{circuit_key}'", flush=True)

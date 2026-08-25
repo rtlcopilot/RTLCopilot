@@ -1,8 +1,4 @@
-"""
-core.py — Shared configuration, paths, LLM client and auth helpers.
 
-Extracted from api.py. Pure move: no behaviour change.
-"""
 
 from __future__ import annotations
 
@@ -12,10 +8,12 @@ import sqlite3
 from pathlib import Path
 from fastapi import HTTPException, Request, Depends
 from openai import OpenAI
+from dotenv import load_dotenv
 import traceback as _tb
 
 # Moved from api.py: core's db helpers depend on these, so they must be
 # defined here rather than in the module that imports core.
+load_dotenv(Path(__file__).parent/".env")
 _OFFLINE_MODE  = os.environ.get("OFFLINE_MODE",   "false").lower() == "true"
 _LOCAL_DB_PATH = Path(__file__).parent / "local_db.json"
 
@@ -36,7 +34,7 @@ _PROVIDER_URLS = {
 }
 _DEFAULT_MODELS = {
     "openai": "gpt-4o-mini",
-    "groq":   "llama-3.3-70b-versatile",
+    "groq":   "openai/gpt-oss-120b",
     "nvidia": "meta/llama-3.3-70b-instruct",
     "local":  "qwen2.5-coder-7b-instruct",
 }
@@ -46,7 +44,7 @@ _LLM_API_KEY  = os.environ.get("LLM_API_KEY",  "")
 _LLM_MODEL    = os.environ.get("LLM_MODEL",    _DEFAULT_MODELS.get(_LLM_PROVIDER, "gpt-4o-mini"))
 _LLM_BASE_URL = _PROVIDER_URLS.get(_LLM_PROVIDER, _PROVIDER_URLS["openai"])
 
-# LLM client timeouts 
+# ── LLM client timeouts ─────────────────────────────────────────────────────
 # The OpenAI SDK defaults to a 600-second timeout with 2 automatic retries, so a
 # provider that stalls can block for up to 30 minutes. Because these calls are
 # synchronous inside async handlers, that blocks the whole event loop — the

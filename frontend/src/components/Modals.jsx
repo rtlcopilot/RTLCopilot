@@ -197,12 +197,16 @@ const PROVIDER_MODELS = {
     { value: "gpt-4o-mini",       label: "GPT-4o mini (fast, cheap)"   },
     { value: "gpt-4o",            label: "GPT-4o (most capable)"        },
     { value: "gpt-4-turbo",       label: "GPT-4 Turbo"                  },
+    { value: "custom",            label: "Enter model name below"       },
   ],
+  // Groq retired the Llama chat models on 2026-06-17 (llama-3.3-70b-versatile,
+  // llama-3.1-8b-instant) along with qwen3-32b and llama-4-scout. A retired ID
+  // returns a fast 404 "model does not exist", which reads like an outage.
   groq: [
-    { value: "llama-3.3-70b-versatile",  label: "Llama 3.3 70B (recommended)" },
-    { value: "llama-3.1-8b-instant",     label: "Llama 3.1 8B (fastest)"      },
-    { value: "mixtral-8x7b-32768",       label: "Mixtral 8x7B"                },
-    { value: "gemma2-9b-it",             label: "Gemma 2 9B"                  },
+    { value: "openai/gpt-oss-120b",  label: "GPT-OSS 120B (recommended)" },
+    { value: "openai/gpt-oss-20b",   label: "GPT-OSS 20B (fastest)"      },
+    { value: "qwen/qwen3.6-27b",     label: "Qwen 3.6 27B"               },
+    { value: "custom",               label: "Enter model name below"     },
   ],
   nvidia: [
     { value: "meta/llama-3.3-70b-instruct",   label: "Llama 3.3 70B Instruct (recommended)" },
@@ -212,6 +216,7 @@ const PROVIDER_MODELS = {
     { value: "microsoft/phi-3-mini-128k-instruct", label: "Phi-3 Mini"                      },
     { value: "deepseek-ai/deepseek-r1",       label: "DeepSeek R1"                          },
     { value: "qwen/qwen2.5-72b-instruct",     label: "Qwen 2.5 72B"                        },
+    { value: "custom",                        label: "Enter model name below"              },
   ],
   local: [
     { value: "custom", label: "Enter model name below" },
@@ -232,6 +237,10 @@ export const ByokModal = ({ isOpen, onClose, byokKey, setByokKey, byokProvider, 
   const meta     = PROVIDER_META[byokProvider]   || PROVIDER_META.openai;
   const isSaved  = !!localStorage.getItem("rtl_byok_key");
   const isLocal  = byokProvider === "local";
+  // A typed model name is needed for `local`, and for any provider where the
+  // user picked "custom" — hosted providers retire model IDs, so a hardcoded
+  // list will always go stale and must never be the only way in.
+  const isCustom = isLocal || byokModel === "custom";
 
   const handleProviderChange = (e) => {
     const prov = e.target.value;
@@ -247,7 +256,7 @@ export const ByokModal = ({ isOpen, onClose, byokKey, setByokKey, byokProvider, 
       alert("Please enter an API key.");
       return;
     }
-    if (!trimmedModel) {
+    if (!trimmedModel || trimmedModel === "custom") {
       alert("Please select or enter a model.");
       return;
     }
@@ -318,9 +327,11 @@ export const ByokModal = ({ isOpen, onClose, byokKey, setByokKey, byokProvider, 
 
           {/* Model dropdown */}
           <label style={labelStyle}>Model</label>
-          {isLocal ? (
-            <input type="text" value={byokModel} onChange={(e) => setByokModel(e.target.value)}
-              placeholder="e.g. qwen2.5-coder-7b-instruct"
+          {isCustom ? (
+            <input type="text" value={byokModel === "custom" ? "" : byokModel}
+              onChange={(e) => setByokModel(e.target.value)}
+              placeholder={isLocal ? "e.g. qwen2.5-coder-7b-instruct"
+                                   : "exact model ID from your provider"}
               style={inputStyle}
               onFocus={(e) => (e.target.style.borderColor = `${T.blue}66`)}
               onBlur={(e)  => (e.target.style.borderColor = T.border2)} />

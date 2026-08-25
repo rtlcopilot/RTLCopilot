@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 
@@ -473,9 +472,15 @@ RULES:
 - NEVER invent a generic_type not in the vocabulary
 - suggested_id: snake_case unique name for this block instance
 - role: one sentence describing what THIS block does in THIS circuit
-- width_hint: data width as string ("1" for control, "8" for byte, "16"/"32" as needed)
+- width_hint: the OPERAND (input) data width as a string — NOT the result width.
+  A 16-bit comparator has width_hint "16" even though it outputs a 1-bit flag;
+  the result width is derived automatically from the operation. Use "1" only
+  for blocks whose INPUTS are genuinely single-bit control signals.
 - connection_hints: describe what drives this block's inputs and what this block drives
-- fsm_states: REQUIRED list of state names when generic_type is a control/sequencing type
+- fsm_states: REQUIRED non-empty list of state names for EVERY one of these
+  generic types: state_machine, handshake_controller, protocol_controller,
+  frame_controller, arbiter, sequencer, divider. A block with no states cannot
+  be built. Even a simple handshake needs at least two (e.g. ["idle", "active"]).
 - fsm_outputs: REQUIRED list of 1-bit output signal names for FSM types
 - If you CANNOT decompose the circuit with confidence, output:
   {"clarification_needed": true, "questions": ["question1", "question2"]}
@@ -533,6 +538,30 @@ Your ONLY job is to define:
   1. Connections between primitives (src_id.src_handle → dst_id.dst_handle)
   2. Parameters for each primitive (width, terminal_value, srMode, etc.)
   3. Top-level module ports (inputs from external, outputs to external)
+
+WIRING PRINCIPLES — read before producing connections:
+
+* PARALLEL vs CHAINED. Blocks are only connected when data must FLOW from one
+  into the next. Blocks that each operate on the SAME source data are parallel:
+  every one of them takes its inputs from the top-level input ports, and none
+  of them feeds another.
+  Example — "AND, OR, XOR and NOT on two inputs, plus a comparator":
+    CORRECT   a -> and_op.in0,  b -> and_op.in1
+              a -> or_op.in0,   b -> or_op.in1
+              a -> xor_op.in0,  b -> xor_op.in1
+              a -> not_op.in0
+              a -> cmp.in0,     b -> cmp.in1      (compares the INPUTS)
+    WRONG     and_op.out -> cmp.in0, or_op.out -> cmp.in1
+              (that compares two results nobody asked to compare)
+
+* Ask of every connection: does the request actually say this value feeds that
+  block? If not, both blocks take their inputs from the top-level ports.
+
+* Every block's inputs must be driven — by a top-level input port or by
+  another block. A block with no driver is an error.
+
+* Each distinct operation result normally becomes its own top-level OUTPUT
+  port unless the request says it is consumed internally.
 
 You must output ONLY a single valid JSON object — no markdown, no explanation outside JSON.
 
