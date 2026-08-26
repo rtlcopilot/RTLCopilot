@@ -1,26 +1,3 @@
-"""
-emit_verilog.py  — RTL Copilot hierarchical code generator
-=============================================================
-Returns a dict:
-  {
-    "top.v":           <top-level Verilog that instantiates sub-modules>,
-    "reg_<name>.v":    <per-instance register module>,
-    "counter_<name>.v":<per-instance counter module>,
-    ...
-  }
-
-Every macro block and structural block (mux > 2 inputs, reg, shift-reg,
-FIFO, penc, sync) gets its own standalone, parameterized .v file.
-Combinational-only blocks (comb, const, encoder, decoder, splitter,
-concatenator) are emitted inline in top.v as assign statements.
-FSM logic is also emitted inline in top.v as always blocks — no separate
-sub-module, so condition signals are naturally in scope.
-
-cli usage:
-  python emit_verilog.py <ir.json>
-  → prints JSON: { "files": {"top.v": "...", ...} }
-"""
-
 import sys as _sys, os as _os
 _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 import port_contract as _pc
@@ -41,6 +18,7 @@ from emit_fsm           import emit_fsm_inline  # updated: accepts gated_signals
 from emit_edge_detector import emit_edge_detector,  edge_detector_instantiation
 from emit_dpram         import emit_dpram,          dpram_instantiation
 from emit_cfg_counter   import emit_cfg_counter,    cfg_counter_instantiation
+from emit_mac           import emit_mac,            mac_instantiation
 try:
     from net_ir import build_net_ir, get_driver_wire as _net_get_driver
     _NET_IR_AVAILABLE = True
@@ -151,6 +129,13 @@ def _get_src(edges: list, raw_nodes: list, name_map: dict,
     if src_node["type"] == "macro_penc":
         return f"{src_name}_{src_port or 'index'}"
 
+    if src_node["type"] == "macro_mac":
+        port_map = {
+            "result":   f"{src_name}_result",
+            "overflow": f"{src_name}_overflow",
+        }
+        return port_map.get(src_port, f"{src_name}_{src_port or 'result'}")
+
     if src_node["type"] == "macro_dpram":
         return f"{src_name}_{src_port or 'dout_a'}"
 
@@ -218,7 +203,8 @@ def emit_verilog(ir: dict) -> dict:
         MACRO_TYPES = {
             "macro_counter", "macro_shiftreg", "macro_sync",
             "macro_fifo", "macro_penc",
-            "macro_edgedet", "macro_dpram", "macro_cfgcounter"
+            "macro_edgedet", "macro_dpram", "macro_cfgcounter",
+            "macro_mac"
         }
         nodes = [
             n for n in raw_nodes
@@ -436,6 +422,12 @@ def emit_verilog(ir: dict) -> dict:
                 top.append(f"    wire {nid};")   # single 1-bit pulse_out wire
                 continue
 
+            if ntyp == "macro_mac":
+                acc_w = _safe_int(n.get("accWidth", n.get("data", {}).get("accWidth", 32)), 32)
+                top.append(f"    wire [{acc_w}-1:0] {nid}_result;")
+                top.append(f"    wire {nid}_overflow;")
+                continue
+
             if ntyp == "macro_shiftreg":
 
                 sr_mode = str(n.get("srMode", n.get("data", {}).get("srMode", "PISO"))).upper().strip()
@@ -495,6 +487,7 @@ def emit_verilog(ir: dict) -> dict:
                         "macro_counter", "macro_shiftreg", "macro_sync",
                         "macro_fifo", "macro_penc",
                         "macro_edgedet", "macro_dpram", "macro_cfgcounter",
+                        "macro_mac",
                         "custom_block"):
                 continue   
 
@@ -771,6 +764,24 @@ def emit_verilog(ir: dict) -> dict:
                     count_wire     = f"{nid}_count" if (nid, "count") in _driven_outputs else "",
                     tc_wire        = f"{nid}_tc",
                     terminal_value = terminal_value
+                ))
+                top.append("")
+
+            elif ntyp == "macro_mac":
+                data_w      = _safe_int(n.get("width",          8)  or 8,  8)
+                acc_w       = _safe_int(n.get("accWidth",       32) or 32, 32)
+                pipeline_st = _safe_int(n.get("pipelineStages",  1) or 1,  1)
+                mod_name, mod_src = emit_mac(nid, data_w, acc_w, pipeline_st)
+                sub_files[f"{mod_name}.v"] = mod_src
+                top.append(f"    // MAC: {nid}")
+                top.append(mac_instantiation(
+                    nid, data_w, acc_w, pipeline_st,
+                    a_src        = src(oid, "a"),
+                    b_src        = src(oid, "b"),
+                    en_src       = src(oid, "en"),
+                    clear_src    = src(oid, "clear"),
+                    result_wire  = f"{nid}_result",
+                    overflow_wire= f"{nid}_overflow",
                 ))
                 top.append("")
 

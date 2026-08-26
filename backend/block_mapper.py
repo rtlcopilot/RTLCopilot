@@ -58,6 +58,10 @@ GENERIC_VOCABULARY: list[str] = [
     "multiplier",           
     "divider",              
     "accumulator_adder",    
+
+    "mac",                  
+    "mac_unit",             
+    "multiply_accumulate",  
 ]
 
 
@@ -293,11 +297,6 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
             "outputs": ["out"],
         },
         "width_rule": "data",
-        # mux_size may be raised by Stage 0 via the `mux_size` concept field
-        # (e.g. 8 for an 8-operation ALU result mux). The port contract then
-        # expands the handle set to in0..in7 + sel0..sel2 — each sel bit is a
-        # SEPARATE 1-bit handle, so a multi-bit select must be split with a
-        # splitter node before it can be wired.
         "mux_size": 2,
         "notes": "in0..inN = DATA_WIDTH; select is per-bit (sel0, sel1, ...), "
                  "each 1 bit — split a multi-bit select with a splitter node",
@@ -352,8 +351,6 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
     "shift_register": {
         "pattern": "macro_shiftreg",
         "handles": {
-            # Live handles depend on srMode and are derived from the port
-            # contract: PISO/SISO expose sout, SIPO/PIPO expose q.
             "inputs":  ["din", "en", "load"],
             "outputs": ["sout"],
         },
@@ -531,6 +528,40 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
         "width_rule": "data",
         "notes": "Add new value to register q; feed back through register",
     },
+
+    "mac": {
+        "pattern": "macro_mac",
+        "handles": {
+            "inputs":  ["a", "b", "en", "clear"],
+            "outputs": ["result", "overflow"],
+        },
+        "width_rule": "data",
+        "notes": (
+            "clk and rst are implicit — NEVER wire from block outputs. "
+            "a and b are DATA_WIDTH bits each. result is ACC_WIDTH bits (default 32). "
+            "overflow is a sticky 1-bit flag cleared by rst or clear. "
+            "PIPELINE_STAGES=1 (default): result valid 2 cycles after en rises. "
+            "PIPELINE_STAGES=0: result valid 1 cycle after en rises."
+        ),
+    },
+    "mac_unit": {
+        "pattern": "macro_mac",
+        "handles": {
+            "inputs":  ["a", "b", "en", "clear"],
+            "outputs": ["result", "overflow"],
+        },
+        "width_rule": "data",
+        "notes": "Alias for mac — see mac entry",
+    },
+    "multiply_accumulate": {
+        "pattern": "macro_mac",
+        "handles": {
+            "inputs":  ["a", "b", "en", "clear"],
+            "outputs": ["result", "overflow"],
+        },
+        "width_rule": "data",
+        "notes": "Alias for mac — see mac entry",
+    },
 }
 
 
@@ -568,9 +599,6 @@ def map_concepts_to_primitives(
         pattern = rule["pattern"]
         comb_op = rule.get("comb_op")
 
-        # DATA_WIDTH for this block. Stage 0's width_hint is advisory only —
-        # it sets the block's data width, but it never decides an individual
-        # handle's width. That is the port contract's job.
         try:
             dw_design = max(1, int(str(design_width or 8)))
         except (TypeError, ValueError):
@@ -580,14 +608,6 @@ def map_concepts_to_primitives(
         except (TypeError, ValueError):
             data_width = dw_design
 
-        # A block's data_width is its OPERAND width. For comparison predicates
-        # (eq/lt/gt/...) Stage 0 reliably reports the RESULT width instead —
-        # it sees "produces a flag" and returns width_hint="1". That made a
-        # 16-bit comparator resolve BOTH operands to 1 bit, which is the
-        # `and_operation.out(16) -> equality_comparator.in0(1)` conflict.
-        #
-        # The result width is derived from comb_op by the port contract, so the
-        # hint is not needed for it and is overridden here.
         if pattern == "comb" and comb_op in pc.COMB_PREDICATE_OPS \
                 and data_width < dw_design:
             print(f"[MAPPER] '{gtype}' is a predicate — operand width "
@@ -599,9 +619,6 @@ def map_concepts_to_primitives(
         sr_mode  = str(c.get("sr_mode") or rule.get("sr_mode") or "PISO").upper()
         addr_w   = int(c.get("addr_width") or 6)
 
-        # Resolve every handle's width from the contract. For FSM patterns the
-        # handle names are design-specific signals (supplied in Stage 3), so
-        # the static placeholder list is kept and every signal is 1 bit.
         if pattern in ("fsm", "fsm_state"):
             handles = rule["handles"]
             handle_widths = {"inputs": {}, "outputs": {}}
@@ -637,15 +654,11 @@ def map_concepts_to_primitives(
             "pattern":          pattern,
             "comb_op":          comb_op,
             "handles":          handles,
-            # Per-handle widths, resolved deterministically. Stage 1 and the
-            # assembler read THIS, never the LLM's own width guesses.
             "handle_widths":    handle_widths,
             "data_width":       data_width,
             "mux_size":         mux_size,
             "sr_mode":          sr_mode,
             "addr_width":       addr_w,
-            # Legacy field, retained so older callers keep working. Derived,
-            # not authoritative — prefer handle_widths.
             "width_rule":       rule["width_rule"],
             "mapper_notes":     rule["notes"],
             "required_inputs":  pc.required_inputs(
@@ -714,6 +727,7 @@ def get_stage0_vocabulary_prompt() -> str:
         ],
         "Arithmetic": [
             "multiplier", "divider", "accumulator_adder",
+            "mac", "mac_unit", "multiply_accumulate",
         ],
     }
 

@@ -26,7 +26,8 @@ _CIRCUIT_KEYWORDS: dict[str, list[str]] = {
     "multiplier":       ["multiplier", "shift add multiply"],
     "divider":          ["divider", "restoring division"],
     "accumulator":      ["accumulator", "running sum"],
-    "mac_unit":         ["mac unit", "multiply accumulate", "mac"],
+    "mac_unit":         ["mac unit", "multiply accumulate", "mac", "multiply-accumulate",
+                         "dot product", "fir tap", "weighted sum", "inner product"],
 
     "clk_divider":      ["clock divider", "clk divider", "frequency divider"],
     "cdc_sync":         ["cdc synchronizer", "clock domain crossing", "cdc sync"],
@@ -1710,6 +1711,40 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
              "src_handle": "out"},
             {"name": "negative", "width": "1", "from": "sign_bit",
              "src_handle": "out"},
+        ],
+        "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
+    },
+
+    "mac_unit": {
+        "blocks": [
+            {
+                "id":      "mac0",
+                "name":    "mac0",
+                "pattern": "macro_mac",
+                "role":    "Multiply a and b each cycle, accumulate result",
+                "data":    {"width": "8", "accWidth": "32", "pipelineStages": "1"},
+                "exports": [
+                    {"signal": "result",   "handle": "result",   "width": "32"},
+                    {"signal": "overflow", "handle": "overflow",  "width": "1"},
+                ],
+                "imports": [
+                    {"signal": "a",     "handle": "a",     "width": "8",  "from": "external"},
+                    {"signal": "b",     "handle": "b",     "width": "8",  "from": "external"},
+                    {"signal": "en",    "handle": "en",    "width": "1",  "from": "external"},
+                    {"signal": "clear", "handle": "clear", "width": "1",  "from": "external"},
+                ],
+                "position": {"x": 400, "y": 300},
+            },
+        ],
+        "top_level_inputs": [
+            {"name": "a",     "width": "8", "to": "mac0", "dst_handle": "a"},
+            {"name": "b",     "width": "8", "to": "mac0", "dst_handle": "b"},
+            {"name": "en",    "width": "1", "to": "mac0", "dst_handle": "en"},
+            {"name": "clear", "width": "1", "to": "mac0", "dst_handle": "clear"},
+        ],
+        "top_level_outputs": [
+            {"name": "result",   "width": "32", "from": "mac0", "src_handle": "result"},
+            {"name": "overflow", "width": "1",  "from": "mac0", "src_handle": "overflow"},
         ],
         "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
     },

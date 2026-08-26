@@ -3,6 +3,7 @@ import {
   SplitterNode, ConcatenatorNode, FsmStateNode, MathNode, MemoryNode,
   CounterNode, ShiftRegNode, SyncNode, FifoNode, EncoderNode, DecoderNode,
   ProbeNode, PriorityEncoderNode, EdgeDetectorNode, DualPortRamNode, CfgCounterNode,
+  MacNode,
 } from "./components/nodes/index.jsx";
 import { CustomBlockNode } from "./components/nodes/CustomBlockNode.jsx";
 import FsmEdge from "./components/edges/FsmEdge.jsx";
@@ -30,6 +31,7 @@ export const nodeTypes = {
   macro_edgedet:    EdgeDetectorNode,
   macro_dpram:      DualPortRamNode,
   macro_cfgcounter: CfgCounterNode,
+  macro_mac:        MacNode,
   custom_block:     CustomBlockNode,
 };
 

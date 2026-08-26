@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import os
@@ -106,6 +104,7 @@ _VALID_TYPES = {
     "macro_penc",
     "macro_fifo", "macro_dpram",
     "macro_edgedet",
+    "macro_mac",
     "fsm_state",
 }
 
@@ -116,6 +115,7 @@ _DEFAULT_SRC = {
     "macro_penc":       "index",
     "macro_dpram":      "dout_a",
     "macro_cfgcounter": "count",
+    "macro_mac":        "result",
     "fsm_state":        "out",
 }
 def _src_handle(ntype):
@@ -133,6 +133,8 @@ def _tgt_handle(ttype, tdata, count):
         return {0:"we_a",1:"addr_a",2:"din_a",3:"we_b",4:"addr_b",5:"din_b"}.get(count,"we_a")
     if ttype == "macro_cfgcounter":
         return {0:"enable",1:"load",2:"load_value"}.get(count,"enable")
+    if ttype == "macro_mac":
+        return {0:"a", 1:"b", 2:"en", 3:"clear"}.get(count, "a")
     if ttype == "mux":
         mux_n = int(tdata.get("muxSize","2") or "2")
         return f"in{count}" if count < mux_n else f"sel{count-mux_n}"

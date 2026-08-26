@@ -822,4 +822,88 @@ export const CfgCounterNode = ({ id, data }) => {
     </NodeWrapper>
   );
 };
+// ─────────────────────────────────────────────────────────────────────────────
+// MacNode
+// ─────────────────────────────────────────────────────────────────────────────
+export const MacNode = ({ id, data }) => {
+  const dw  = data.width    || "8";
+  const aw  = data.accWidth || "32";
+  const pl  = data.pipelineStages !== undefined ? String(data.pipelineStages) : "1";
+
+  return (
+    <NodeWrapper data={data} id={id} customStyle={{ ...nodeBox, minWidth: "175px" }}>
+      {/* Header */}
+      <div style={{ color: "#a855f7", fontWeight: "bold", fontSize: "12px", marginBottom: "2px" }}>
+        <EditableLabel value={data.name} onChange={data.rename} />
+      </div>
+      <div style={{ fontSize: "9px", color: T.textSecondary, letterSpacing: "1px", marginBottom: "8px" }}>MAC  ✕∑</div>
+
+      {/* Params */}
+      <div style={{ background: T.bg2, border: `1px solid ${T.border2}`, borderRadius: T.r6, padding: "6px 8px", marginBottom: "8px", fontSize: "10px", color: T.textSecondary }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+          <span>Data Width</span>
+          <input type="text" value={dw} onChange={(e) => data.setWidth?.(e.target.value)}
+            style={{ width: "40px", textAlign: "center", background: T.bg3, border: `1px solid ${T.border2}`, color: T.blue, borderRadius: T.r4, fontSize: "10px" }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+          <span>Acc Width</span>
+          <input type="text" value={aw} onChange={(e) => data.setAccWidth?.(e.target.value)}
+            style={{ width: "40px", textAlign: "center", background: T.bg3, border: `1px solid ${T.border2}`, color: T.amber, borderRadius: T.r4, fontSize: "10px" }} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Pipeline</span>
+          <div style={{ display: "flex", borderRadius: T.r4, overflow: "hidden", border: `1px solid ${T.border2}` }}>
+            {["0", "1"].map((v) => (
+              <button key={v} onClick={() => data.setPipelineStages?.(parseInt(v))}
+                style={{ padding: "3px 8px", fontSize: "9px", fontWeight: "bold", border: "none", cursor: "pointer", background: pl === v ? "#a855f722" : T.bg4, color: pl === v ? "#a855f7" : T.textMuted }}>
+                {v === "0" ? "Comb" : "Reg"}
+              </button>
+            ))}
+          </div>
+        </div>
+        {pl === "1" && (
+          <div style={{ fontSize: "8px", color: T.textMuted, marginTop: "4px", fontStyle: "italic" }}>
+            result valid after 2 cycles
+          </div>
+        )}
+      </div>
+
+      {/* Pins */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        {/* Inputs */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {[
+            { id: "a",     label: "A",     color: T.blue  },
+            { id: "b",     label: "B",     color: T.blue  },
+            { id: "en",    label: "EN",    color: T.green },
+            { id: "clear", label: "CLR",   color: T.amber },
+          ].map((p) => (
+            <div key={p.id} style={{ position: "relative", paddingLeft: "14px", display: "flex", alignItems: "center" }}>
+              <Handle type="target" position={Position.Left} id={p.id} style={{ background: p.color, width: "7px", height: "7px" }} />
+              <span style={{ fontSize: "9px", color: T.textSecondary, fontFamily: T.fontMono }}>{p.label}</span>
+            </div>
+          ))}
+        </div>
+        {/* Outputs */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {[
+            { id: "result",   label: "RESULT",   color: T.sigOutput },
+            { id: "overflow", label: "OVF",      color: T.red       },
+          ].map((p) => (
+            <div key={p.id} style={{ position: "relative", paddingRight: "14px", display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+              <span style={{ fontSize: "9px", color: T.textSecondary, fontFamily: T.fontMono }}>{p.label}</span>
+              <Handle type="source" position={Position.Right} id={p.id} style={{ background: p.color, width: "7px", height: "7px" }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* clk/rst note */}
+      <div style={{ marginTop: "8px", fontSize: "8px", color: T.textMuted, fontStyle: "italic", textAlign: "center" }}>
+        clk · rst implicit
+      </div>
+    </NodeWrapper>
+  );
+};
+
 export { CustomBlockNode };

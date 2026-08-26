@@ -6,6 +6,7 @@ import math
 ONE        = "1"
 DATA       = "data"
 ADDR       = "addr"
+ACC        = "acc"          
 CLOG2_DATA = "clog2(data)"
 TWICE_DATA = "2*data"
 SERIAL     = "serial"
@@ -79,11 +80,11 @@ PATTERN_PORTS: dict[str, dict[str, dict]] = {
         "outputs": {"out": DATA},
     },
     "mux": {
-        "inputs":  {"in*": DATA, "sel*": ONE},   # sel is split into 1-bit handles
+        "inputs":  {"in*": DATA, "sel*": ONE},   
         "outputs": {"out": DATA},
     },
     "const": {
-        "inputs":  {"in": DATA},                 # optional pass-through driver
+        "inputs":  {"in": DATA},                 
         "outputs": {"out": DATA},
     },
     "input":  {"inputs": {}, "outputs": {"out": DATA}},
@@ -136,6 +137,13 @@ PATTERN_PORTS: dict[str, dict[str, dict]] = {
         "inputs":  {"we_a": ONE, "addr_a": ADDR, "din_a": DATA,
                     "we_b": ONE, "addr_b": ADDR, "din_b": DATA},
         "outputs": {"dout_a": DATA, "dout_b": DATA},
+    },
+    "macro_mac": {
+        # Multiply-Accumulate: result = Σ(a × b) each cycle en is high.
+        # clk and rst are implicit (connected to top-level ports, never wired
+        # from other block outputs).
+        "inputs":  {"a": DATA, "b": DATA, "en": ONE, "clear": ONE},
+        "outputs": {"result": ACC, "overflow": ONE},
     },
     "macro_rom": {
         "inputs":  {"addr": ADDR},
@@ -206,6 +214,7 @@ def resolve_width(
     direction: str = "inputs",
     comb_op: str | None = None,
     addr_width: int = 6,
+    acc_width: int = 32,
     sr_mode: str | None = None,
 ) -> int | None:
     """Resolve a (pattern, handle) pair to a concrete bit width.
@@ -221,16 +230,8 @@ def resolve_width(
     handle  = canonical(handle, pattern)
     dw      = max(1, int(data_width or 1))
     aw      = max(1, int(addr_width or 1))
+    acw     = max(1, int(acc_width or 32))
 
-    # Placeholder handles (<condition_signals>, <fsm_output_signals>) are
-    # stand-ins that Stage 3 replaces with real signal names. They are not
-    # ports and have no width.
-    #
-    # The FSM pattern declares {"*": ONE}, so the wildcard matched these and
-    # resolved them to 1 bit — which made the assembler report
-    #   WIDTH CONFLICT fifo.dout(32) -> ctrl.<condition_signals>(1)
-    # against a handle that does not exist yet. Retrying Stage 1 could never
-    # clear it, so every multi-FSM design failed validation on a phantom.
     if is_placeholder(handle):
         return None
 
@@ -246,8 +247,7 @@ def resolve_width(
         if op in COMB_WIDENING_OPS:
             spec = COMB_WIDENING_OPS[op]
 
-    # shift register: the serial side is 1 bit, the parallel side is data
-    # width, and which handles are live depends on srMode.
+
     if pattern == "macro_shiftreg" and spec is SERIAL:
         return 1
 
@@ -259,6 +259,8 @@ def resolve_width(
         return dw
     if spec == ADDR:
         return aw
+    if spec == ACC:
+        return acw
     if spec == SERIAL:
         return 1
     if spec == CLOG2_DATA:
@@ -278,6 +280,7 @@ def port_widths(
     data_width: int = 8,
     comb_op: str | None = None,
     addr_width: int = 6,
+    acc_width: int = 32,
     sr_mode: str | None = None,
     mux_size: int = 2,
 ) -> dict[str, dict[str, int | None]]:
@@ -315,7 +318,8 @@ def port_widths(
             for nm in names:
                 out[direction][nm] = resolve_width(
                     pattern, nm, data_width=data_width, direction=direction,
-                    comb_op=comb_op, addr_width=addr_width, sr_mode=sr_mode)
+                    comb_op=comb_op, addr_width=addr_width,
+                    acc_width=acc_width, sr_mode=sr_mode)
 
 
     if pattern == "macro_shiftreg":
@@ -383,6 +387,7 @@ _REQUIRED_INPUTS: dict[str, list[str]] = {
     "macro_edgedet":     ["signal_in"],
     "macro_dpram":       ["addr_a", "addr_b"],
     "macro_rom":         ["addr"],
+    "macro_mac":         ["a", "b", "en"],
     "encoder":           ["data_in"],
     "decoder":           ["data_in"],
     "output":            ["in"],
@@ -399,7 +404,7 @@ def handle_contract() -> dict:
     return {
         "version": 1,
         "specs": {
-            "ONE": ONE, "DATA": DATA, "ADDR": ADDR,
+            "ONE": ONE, "DATA": DATA, "ADDR": ADDR, "ACC": ACC,
             "CLOG2_DATA": CLOG2_DATA, "TWICE_DATA": TWICE_DATA,
             "SERIAL": SERIAL, "FREE": "free",
         },

@@ -55,6 +55,7 @@ export const COMPONENT_CATEGORIES = [
       { label: "Encoder",          type: "encoder",     op: "enc" },
       { label: "Decoder",          type: "decoder",     op: "dec" },
       { label: "Priority Encoder", type: "macro_penc",  abstraction: "L1" },
+      { label: "MAC",              type: "macro_mac",   abstraction: "L1" },
     ],
   },
   {

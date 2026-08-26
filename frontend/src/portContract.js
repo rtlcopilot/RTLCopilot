@@ -18,6 +18,7 @@ import { API_BASE } from "./config";
 const ONE = "1";
 const DATA = "data";
 const ADDR = "addr";
+const ACC  = "acc";
 const CLOG2_DATA = "clog2(data)";
 const TWICE_DATA = "2*data";
 const SERIAL = "serial";
@@ -45,6 +46,8 @@ const FALLBACK = {
     macro_edgedet:{ inputs: { signal_in: ONE },                     outputs: { out: ONE } },
     macro_dpram:  { inputs: { we_a: ONE, addr_a: ADDR, din_a: DATA, we_b: ONE, addr_b: ADDR, din_b: DATA },
                     outputs: { dout_a: DATA, dout_b: DATA } },
+    macro_mac:    { inputs: { a: DATA, b: DATA, en: ONE, clear: ONE },
+                    outputs: { result: ACC, overflow: ONE } },
     macro_rom:    { inputs: { addr: ADDR },                         outputs: { dout: DATA } },
     encoder:      { inputs: { data_in: DATA },                      outputs: { out: CLOG2_DATA } },
     decoder:      { inputs: { data_in: CLOG2_DATA },                outputs: { out: DATA } },
@@ -66,6 +69,7 @@ const FALLBACK = {
     macro_cfgcounter: ["en"], macro_fifo: ["din", "wr_en", "rd_en"],
     macro_penc: ["data_in"], macro_edgedet: ["signal_in"],
     macro_dpram: ["addr_a", "addr_b"], macro_rom: ["addr"],
+    macro_mac: ["a", "b", "en"],
     encoder: ["data_in"], decoder: ["data_in"], output: ["in"],
   },
   shiftreg_serial_out: ["PISO", "SISO"],
@@ -170,6 +174,7 @@ export function resolveWidth(pattern, handle, direction, nodeData = {}) {
   if (s === ONE || s === SERIAL) return 1;
   if (s === DATA) return dw;
   if (s === ADDR) return aw;
+  if (s === ACC)  return intOr(nodeData.accWidth, 32);
   if (s === CLOG2_DATA) return Math.max(1, Math.ceil(Math.log2(Math.max(dw, 2))));
   if (s === TWICE_DATA) return 2 * dw;
   const lit = parseInt(s, 10);

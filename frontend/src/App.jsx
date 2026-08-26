@@ -401,9 +401,11 @@ export default function App() {
         setFsmOutputs:  (v) => _updateNodeField(nid, "fsmOutputs", v),
         setEdgeType:    (v) => _updateNodeField(nid, "edgeType", v),
         setAddrWidth:   (v) => _updateNodeField(nid, "addrWidth", v),
-        setCountDir:    (v) => _updateNodeField(nid, "countDir", v),
-        setSrMode:      (v) => _updateNodeField(nid, "srMode", v),
-        setShiftDir:    (v) => _updateNodeField(nid, "shiftDir", v),
+        setCountDir:      (v) => _updateNodeField(nid, "countDir", v),
+        setSrMode:        (v) => _updateNodeField(nid, "srMode", v),
+        setShiftDir:      (v) => _updateNodeField(nid, "shiftDir", v),
+        setAccWidth:      (v) => _updateNodeField(nid, "accWidth", v),
+        setPipelineStages:(v) => _updateNodeField(nid, "pipelineStages", v),
       },
     };
   }, [setNodes, setEdges, handleValueChange, _updateNodeField]);
@@ -623,6 +625,21 @@ export default function App() {
             return { ...node, data: { ...node.data, value: next } };
           }
         }
+        if (node.type === "macro_mac") {
+          const aEdge     = edges.find((e) => e.target === node.id && e.targetHandle === "a");
+          const bEdge     = edges.find((e) => e.target === node.id && e.targetHandle === "b");
+          const enEdge    = edges.find((e) => e.target === node.id && e.targetHandle === "en");
+          const clearEdge = edges.find((e) => e.target === node.id && e.targetHandle === "clear");
+          const en    = enEdge    ? valOf(enEdge.source)    : 0;
+          const clr   = clearEdge ? valOf(clearEdge.source) : 0;
+          const a     = aEdge     ? valOf(aEdge.source)     : 0;
+          const b     = bEdge     ? valOf(bEdge.source)     : 0;
+          const accW  = parseInt(node.data.accWidth || 32);
+          const maxAcc = Math.pow(2, Math.min(accW, 32)) - 1; // JS safe-int guard
+          const cur   = parseInt(node.data.value) || 0;
+          if (clr) return { ...node, data: { ...node.data, value: 0 } };
+          if (en)  return { ...node, data: { ...node.data, value: Math.min(cur + a * b, maxAcc) } };
+        }
         return node;
       });
     });
@@ -706,7 +723,7 @@ export default function App() {
 
   const compileIR = () => {
     let hwN = []; let hwE = [];
-    const macroTypes = ["macro_counter","macro_sync","macro_shiftreg","macro_rom","encoder","decoder","macro_fifo","macro_penc","macro_edgedet","macro_dpram","macro_cfgcounter"];
+    const macroTypes = ["macro_counter","macro_sync","macro_shiftreg","macro_rom","encoder","decoder","macro_fifo","macro_penc","macro_edgedet","macro_dpram","macro_cfgcounter","macro_mac"];
     nodes.forEach((n) => {
       const w = n.data.width; const nm = n.data.name;
       if (n.type === "custom_block") {
@@ -722,7 +739,7 @@ export default function App() {
             hwE.push({ src: e.source, dst: e.target, src_port: e.sourceHandle, dst_port: e.targetHandle, condition: "1" });
         });
       } else if (macroTypes.includes(n.type)) {
-        hwN.push({ id: n.id, type: n.type, name: nm, width: w, depth: n.data.depth || "256", joinerSize: n.data.joinerSize, fifoDepth: n.data.fifoDepth || "16", aeThresh: n.data.aeThresh || "4", lsbPriority: n.data.lsbPriority ?? 0, edgeType: n.data.edgeType ?? 0, addrWidth: n.data.addrWidth || "6", countDir: n.data.countDir ?? 1, srMode: n.data.srMode || "PISO", shiftDir: n.data.shiftDir || "right", terminalValue: n.data.terminalValue || null });
+        hwN.push({ id: n.id, type: n.type, name: nm, width: w, depth: n.data.depth || "256", joinerSize: n.data.joinerSize, fifoDepth: n.data.fifoDepth || "16", aeThresh: n.data.aeThresh || "4", lsbPriority: n.data.lsbPriority ?? 0, edgeType: n.data.edgeType ?? 0, addrWidth: n.data.addrWidth || "6", countDir: n.data.countDir ?? 1, srMode: n.data.srMode || "PISO", shiftDir: n.data.shiftDir || "right", terminalValue: n.data.terminalValue || null, accWidth: n.data.accWidth || "32", pipelineStages: n.data.pipelineStages ?? 1 });
         edges.filter((e) => e.target === n.id || e.source === n.id).forEach((e) => {
           if (!hwE.some((ex) => ex.src === e.source && ex.dst === e.target && ex.src_port === e.sourceHandle && ex.dst_port === e.targetHandle))
             hwE.push({ src: e.source, dst: e.target, src_port: e.sourceHandle, dst_port: e.targetHandle, condition: e.data?.condition || e.label || "1", ...(e.priority !== undefined ? { priority: e.priority } : {}) });

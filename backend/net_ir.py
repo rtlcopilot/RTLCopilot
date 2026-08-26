@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 from typing import Any
 
@@ -26,6 +24,7 @@ _ONE_BIT_HANDLES = {
     "macro_sync":       frozenset({"out"}),
     "macro_counter":    frozenset({"en", "res"}),
     "fsm_state":        frozenset({"in", "out"}),
+    "macro_mac":        frozenset({"en", "clear", "overflow"}),
 }
 
 
@@ -101,6 +100,10 @@ def _node_output_wire(node: dict, handle: str, name_map: dict) -> str:
 
     if ntype == "macro_edgedet":
         return nname
+
+    if ntype == "macro_mac":
+        m = {"result": f"{nname}_result", "overflow": f"{nname}_overflow"}
+        return m.get(handle, f"{nname}_{handle or 'result'}")
 
     if ntype == "macro_dpram":
         m = {"dout_a": f"{nname}_dout_a", "dout_b": f"{nname}_dout_b"}
