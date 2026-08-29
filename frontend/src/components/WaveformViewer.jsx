@@ -2,8 +2,10 @@ import React, { useState, useEffect, useRef } from "react";
 import { T } from "../constants";
 
 const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
-  const canvasRef  = useRef(null);
-  const overlayRef = useRef(null);
+  const canvasRef      = useRef(null);
+  const overlayRef     = useRef(null);
+  const sigListRef     = useRef(null);
+  const canvasScrollRef= useRef(null);
   const [cursorTime, setCursorTime] = useState(null);
   const [markerTime, setMarkerTime] = useState(null);
   const [sigOrder,   setSigOrder]   = useState(null);
@@ -243,10 +245,12 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
           </span>
         )}
         <div style={{ flex: 1 }} />
-        <button onClick={() => setZoomLevel((z) => Math.max(0.5, +(z - 0.25).toFixed(2)))}
+        <button onClick={() => setZoomLevel((z) => Math.max(0.5, +(z - 0.5).toFixed(1)))}
+          title="Zoom out (or Ctrl+scroll)"
           style={{ background: T.bg3, border: `1px solid ${T.border2}`, borderRadius: T.r4, color: T.textSecondary, fontSize: "13px", width: "24px", height: "24px", cursor: "pointer", lineHeight: 1 }}>−</button>
         <span style={{ fontSize: "10px", color: T.textMuted, fontFamily: T.fontMono, minWidth: "34px", textAlign: "center" }}>{zoomLevel.toFixed(1)}x</span>
-        <button onClick={() => setZoomLevel((z) => Math.min(4.0, +(z + 0.25).toFixed(2)))}
+        <button onClick={() => setZoomLevel((z) => Math.min(10.0, +(z + 0.5).toFixed(1)))}
+          title="Zoom in (or Ctrl+scroll)"
           style={{ background: T.bg3, border: `1px solid ${T.border2}`, borderRadius: T.r4, color: T.textSecondary, fontSize: "13px", width: "24px", height: "24px", cursor: "pointer", lineHeight: 1 }}>+</button>
         <a href={"data:text/plain;charset=utf-8," + encodeURIComponent(data.vcd_raw)} download="simulation.vcd"
           style={{ display: "inline-flex", alignItems: "center", gap: "5px", height: "26px", padding: "0 10px", background: `${T.blue}18`, border: `1px solid ${T.blue}44`, borderRadius: T.r6, color: T.blue, fontSize: "11px", textDecoration: "none", fontFamily: T.fontUI }}>
@@ -260,8 +264,24 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
 
       {/* Body */}
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-        {/* Signal list panel */}
-        <div style={{ width: "170px", flexShrink: 0, background: T.bg2, borderRight: `1px solid ${T.border0}`, overflowY: "auto", paddingTop: "28px" }}>
+        {/* Shared scroll wrapper — signal list + canvas scroll together vertically */}
+        <div style={{ flex: 1, display: "flex", overflow: "hidden" }}
+          onWheel={(e) => {
+            // Horizontal scroll on shift+wheel, zoom on ctrl+wheel
+            if (e.ctrlKey) {
+              e.preventDefault();
+              setZoomLevel((z) => {
+                const next = e.deltaY < 0 ? z + 0.5 : z - 0.5;
+                return Math.max(0.5, Math.min(10.0, +next.toFixed(1)));
+              });
+            }
+          }}
+        >
+          {/* Signal list panel — scrolls vertically in sync */}
+          <div
+            ref={sigListRef}
+            onScroll={(e) => { if (canvasScrollRef.current) canvasScrollRef.current.scrollTop = e.target.scrollTop; }}
+            style={{ width: "170px", flexShrink: 0, background: T.bg2, borderRight: `1px solid ${T.border0}`, overflowY: "scroll", overflowX: "hidden", paddingTop: "28px" }}>
           {visibleSignals.map((sig, i) => {
             const isPinned = pinnedSigs.has(sig.name);
             const sigColor = sig.name.toLowerCase().includes("clk") ? T.sigClock : sig.name.toLowerCase().includes("rst") ? T.sigReset : sig.width > 1 ? T.cyan : T.textSecondary;
@@ -295,46 +315,50 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
               ))}
             </div>
           )}
-        </div>
-
-        {/* Canvas area */}
-        <div style={{ flex: 1, overflowX: "auto", overflowY: "hidden", position: "relative" }}>
-          {/* Time ruler */}
-          <div style={{ height: "28px", background: T.bg3, borderBottom: `1px solid ${T.border0}`, position: "sticky", top: 0, display: "flex", alignItems: "center", padding: "0 10px", gap: "14px", fontSize: "9px", color: T.textMuted, fontFamily: T.fontMono, letterSpacing: "0.5px" }}>
-            <span>TIME SCALE: {timescale}</span>
-            {cursorTime !== null && <span style={{ color: T.amber }}>cursor: {cursorTime} ns</span>}
-            {markerTime !== null && cursorTime !== null && markerTime !== cursorTime && (
-              <span style={{ color: T.cyan }}>&#x394;= {Math.abs(cursorTime - markerTime)} ns</span>
-            )}
-            {(cursorTime !== null || markerTime !== null) && (
-              <button onClick={() => { setCursorTime(null); setMarkerTime(null); }}
-                style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: "9px", padding: "0 4px" }}>clear</button>
-            )}
           </div>
 
-          {/* Stacked canvas layers */}
-          <div style={{ position: "relative", width: `${Math.round(1600 * zoomLevel)}px`, height: `${visibleSignals.length * 40}px` }}>
-            <canvas ref={canvasRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
-              style={{ display: "block", imageRendering: "crisp-edges", position: "absolute", top: 0, left: 0 }} />
-            <canvas ref={overlayRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
-              style={{ display: "block", position: "absolute", top: 0, left: 0, cursor: "crosshair" }}
-              onMouseMove={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const px = e.clientX - rect.left;
-                const canvasW = Math.round(1600 * zoomLevel);
-                const t = Math.round(((px - 10) / (canvasW - 20)) * maxTime);
-                setCursorTime(Math.max(0, Math.min(t, maxTime)));
-              }}
-              onMouseLeave={() => { if (markerTime === null) setCursorTime(null); }}
-              onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect();
-                const px = e.clientX - rect.left;
-                const canvasW = Math.round(1600 * zoomLevel);
-                const t = Math.round(((px - 10) / (canvasW - 20)) * maxTime);
-                const snapped = Math.max(0, Math.min(t, maxTime));
-                setMarkerTime((prev) => prev === snapped ? null : snapped);
-              }}
-            />
+          {/* Canvas area — scrolls both X and Y */}
+          <div
+            ref={canvasScrollRef}
+            onScroll={(e) => { if (sigListRef.current) sigListRef.current.scrollTop = e.target.scrollTop; }}
+            style={{ flex: 1, overflowX: "auto", overflowY: "scroll", position: "relative" }}>
+            {/* Time ruler — sticky top so it stays visible while scrolling down */}
+            <div style={{ height: "28px", background: T.bg3, borderBottom: `1px solid ${T.border0}`, position: "sticky", top: 0, zIndex: 5, display: "flex", alignItems: "center", padding: "0 10px", gap: "14px", fontSize: "9px", color: T.textMuted, fontFamily: T.fontMono, letterSpacing: "0.5px" }}>
+              <span>TIME SCALE: {timescale}</span>
+              {cursorTime !== null && <span style={{ color: T.amber }}>cursor: {cursorTime} ns</span>}
+              {markerTime !== null && cursorTime !== null && markerTime !== cursorTime && (
+                <span style={{ color: T.cyan }}>&#x394;= {Math.abs(cursorTime - markerTime)} ns</span>
+              )}
+              {(cursorTime !== null || markerTime !== null) && (
+                <button onClick={() => { setCursorTime(null); setMarkerTime(null); }}
+                  style={{ background: "none", border: "none", color: T.textMuted, cursor: "pointer", fontSize: "9px", padding: "0 4px" }}>clear</button>
+              )}
+            </div>
+
+            {/* Stacked canvas layers */}
+            <div style={{ position: "relative", width: `${Math.round(1600 * zoomLevel)}px`, height: `${visibleSignals.length * 40}px` }}>
+              <canvas ref={canvasRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
+                style={{ display: "block", imageRendering: "crisp-edges", position: "absolute", top: 0, left: 0 }} />
+              <canvas ref={overlayRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
+                style={{ display: "block", position: "absolute", top: 0, left: 0, cursor: "crosshair" }}
+                onMouseMove={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const px = e.clientX - rect.left;
+                  const canvasW = Math.round(1600 * zoomLevel);
+                  const t = Math.round(((px - 10) / (canvasW - 20)) * maxTime);
+                  setCursorTime(Math.max(0, Math.min(t, maxTime)));
+                }}
+                onMouseLeave={() => { if (markerTime === null) setCursorTime(null); }}
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const px = e.clientX - rect.left;
+                  const canvasW = Math.round(1600 * zoomLevel);
+                  const t = Math.round(((px - 10) / (canvasW - 20)) * maxTime);
+                  const snapped = Math.max(0, Math.min(t, maxTime));
+                  setMarkerTime((prev) => prev === snapped ? null : snapped);
+                }}
+              />
+            </div>
           </div>
         </div>
       </div>

@@ -63,6 +63,7 @@ def _needs_seq(ir):
         "macro_counter", "macro_shiftreg", "macro_sync",
         "macro_fifo", "macro_penc",
         "macro_edgedet", "macro_dpram", "macro_cfgcounter",
+        "macro_mac",
     }
 
 

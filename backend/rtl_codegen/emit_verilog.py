@@ -770,7 +770,7 @@ def emit_verilog(ir: dict) -> dict:
             elif ntyp == "macro_mac":
                 data_w      = _safe_int(n.get("width",          8)  or 8,  8)
                 acc_w       = _safe_int(n.get("accWidth",       32) or 32, 32)
-                pipeline_st = _safe_int(n.get("pipelineStages",  1) or 1,  1)
+                pipeline_st = _safe_int(n.get("pipelineStages",  1) if n.get("pipelineStages") is not None else 1, 1)
                 mod_name, mod_src = emit_mac(nid, data_w, acc_w, pipeline_st)
                 sub_files[f"{mod_name}.v"] = mod_src
                 top.append(f"    // MAC: {nid}")
