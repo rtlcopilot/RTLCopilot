@@ -1,11 +1,14 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { T } from "../constants";
 
-const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
+const WaveformViewer = ({ data, waveformHeight, setWaveformHeight, onClose }) => {
   const canvasRef      = useRef(null);
   const overlayRef     = useRef(null);
   const sigListRef     = useRef(null);
   const canvasScrollRef= useRef(null);
+  const [canvasReady,  setCanvasReady]  = useState(false);
+  const canvasCallbackRef  = useCallback((el) => { canvasRef.current  = el; if (el) setCanvasReady(true); }, []);
+  const overlayCallbackRef = useCallback((el) => { overlayRef.current = el; }, []);
   const [cursorTime, setCursorTime] = useState(null);
   const [markerTime, setMarkerTime] = useState(null);
   const [sigOrder,   setSigOrder]   = useState(null);
@@ -159,7 +162,7 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
       ctx.lineTo(width, rowY + rowHeight - 0.5);
       ctx.stroke();
     });
-  }, [data, visibleSignals, zoomLevel]);
+  }, [data, visibleSignals, zoomLevel, canvasReady]);
 
   useEffect(() => {
     if (!overlayRef.current || !data?.waveform) return;
@@ -256,7 +259,7 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
           style={{ display: "inline-flex", alignItems: "center", gap: "5px", height: "26px", padding: "0 10px", background: `${T.blue}18`, border: `1px solid ${T.blue}44`, borderRadius: T.r6, color: T.blue, fontSize: "11px", textDecoration: "none", fontFamily: T.fontUI }}>
           ↓ VCD
         </a>
-        <button onClick={() => setWaveformHeight(0)}
+        <button onClick={() => { if (onClose) onClose(); else setWaveformHeight(0); }}
           style={{ background: "transparent", border: "none", color: T.textMuted, fontSize: "16px", cursor: "pointer", padding: "0 4px", lineHeight: 1, transition: "color 0.12s" }}
           onMouseEnter={(e) => (e.currentTarget.style.color = T.red)}
           onMouseLeave={(e) => (e.currentTarget.style.color = T.textMuted)}>×</button>
@@ -337,9 +340,9 @@ const WaveformViewer = ({ data, waveformHeight, setWaveformHeight }) => {
 
             {/* Stacked canvas layers */}
             <div style={{ position: "relative", width: `${Math.round(1600 * zoomLevel)}px`, height: `${visibleSignals.length * 40}px` }}>
-              <canvas ref={canvasRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
+              <canvas ref={canvasCallbackRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
                 style={{ display: "block", imageRendering: "crisp-edges", position: "absolute", top: 0, left: 0 }} />
-              <canvas ref={overlayRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
+              <canvas ref={overlayCallbackRef} width={Math.round(1600 * zoomLevel)} height={visibleSignals.length * 40}
                 style={{ display: "block", position: "absolute", top: 0, left: 0, cursor: "crosshair" }}
                 onMouseMove={(e) => {
                   const rect = e.currentTarget.getBoundingClientRect();

@@ -27,6 +27,7 @@ import AiSidebar from "./components/AiSidebar";
 import { AuthModal, OnboardingModal, FeedbackModal, ByokModal } from "./components/Modals";
 import CustomBlockModal from "./components/CustomBlockModal";
 
+let _onboardingShownThisSession = false;
 
 export default function App() {
   React.useEffect(() => {
@@ -91,14 +92,14 @@ export default function App() {
   const [bottomPanelHeight,  setBottomPanelHeight]  = useState(340);
   const [drcLogs,            setDrcLogs]            = useState([]);
 
-  // Pull the port width contract from the backend once, so canvas DRC and the
-  // Verilog emitter agree on every handle width.
+
   useEffect(() => { loadPortContract(); }, []);
 
   const [simulationResult, setSimulationResult] = useState(null);
   const [showWaveform,     setShowWaveform]     = useState(false);
   const [simulating,       setSimulating]       = useState(false);
   const [waveformHeight,   setWaveformHeight]   = useState(420);
+  const simRunSeqRef = useRef(0);
 
   const [toast, setToast] = useState(null);
   const showToast = (msg, type = "info") => {
@@ -238,7 +239,8 @@ export default function App() {
         if (event === "SIGNED_IN") {
           setHasEntered(true);
           const key = `rtl_onboarded_${session.user.id}`;
-          if (!localStorage.getItem(key)) {
+          if (!localStorage.getItem(key) && !_onboardingShownThisSession) {
+            _onboardingShownThisSession = true;
             setOnboardingData((d) => ({ ...d, name: session.user.user_metadata?.full_name || "" }));
             setTimeout(() => setShowOnboarding(true), 600);
           }
@@ -279,7 +281,11 @@ export default function App() {
     setVerilogFiles({}); setTestbenchCode("");
     setRtlReady(false); setTbReady(false);
     setCanonicalIR(null);
-    setSimulationResult(null); setShowWaveform(false);
+    setSimulationResult(null); setShowWaveform(false); setWaveformHeight(420);
+    // Clear DRC results too — otherwise a stale "combinational loop" message from
+    // the previous circuit keeps blocking simulation of the new one.
+    setDrcLogs([]);
+    simRunSeqRef.current = 0;
     setVerifyHistory([]);
     setChatHistory([{ role: "assistant", text: "Hello! I can help you design circuits. What should we build?" }]);
     setTbSteps([{ time: 0, values: {} }]); setTbConfigDirty(false);
@@ -344,7 +350,9 @@ export default function App() {
         setIsDirty(false); setRtlReady(false); setTbReady(false);
         setVerilogFiles({}); setTestbenchCode("");
         setCanonicalIR(null);
-        setSimulationResult(null); setShowWaveform(false);
+        setSimulationResult(null); setShowWaveform(false); setWaveformHeight(420);
+        setDrcLogs([]);
+        simRunSeqRef.current = 0;
         setVerifyHistory([]);
         setTbSteps([{ time: 0, values: {} }]); setTbConfigDirty(false);
         showToast(`Loaded "${proj.name}"`, "success");
@@ -368,11 +376,15 @@ export default function App() {
   };
 
   const handleValueChange = useCallback((nodeId, newValue) => {
+    // Any canvas edit invalidates the AI-supplied canonicalIR so generateVerilog
+    // rebuilds from the live canvas (compileIR) instead of emitting stale RTL.
+    setCanonicalIR(null);
     setNodes((nds) => nds.map((node) => node.id === nodeId ? { ...node, data: { ...node.data, value: newValue } } : node));
   }, [setNodes]);
 
   // Generic node field updater — avoids stale closure over node.id
   const _updateNodeField = useCallback((nodeId, field, value) => {
+    setCanonicalIR(null);
     setNodes((ns) => ns.map((n) => n.id === nodeId ? { ...n, data: { ...n.data, [field]: value } } : n));
   }, [setNodes]);
 
@@ -383,12 +395,13 @@ export default function App() {
       data: {
         ...node.data,
         onChangeValue: handleValueChange,
-        onDelete: (id) => { setNodes((nds) => nds.filter((n) => n.id !== id)); setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id)); },
+        onDelete: (id) => { setCanonicalIR(null); setNodes((nds) => nds.filter((n) => n.id !== id)); setEdges((eds) => eds.filter((e) => e.source !== id && e.target !== id)); },
         setWidth:       (w) => _updateNodeField(nid, "width", w),
         setBitIndex:    (i) => _updateNodeField(nid, "bitIndex", i),
         setMuxSize:     (s) => {
           const numInputs = parseInt(s) || 2;
           const selWidth  = Math.max(1, Math.ceil(Math.log2(numInputs)));
+          setCanonicalIR(null);
           setNodes((ns) => ns.map((n) => n.id === nid ? { ...n, data: { ...n.data, muxSize: s, selWidth } } : n));
         },
         setJoinerSize:  (s) => _updateNodeField(nid, "joinerSize", s),
@@ -422,6 +435,7 @@ export default function App() {
   };
 
   const addNode = () => {
+    setCanonicalIR(null);
     const idx = nextFreeIndex(nodes, selected.type);
     const id  = `${selected.type}_${idx}`;
     const cordicOps = ["sine_cos", "arctan", "sinh_cosh", "tanh", "exp", "ln", "sqrt"];
@@ -460,16 +474,19 @@ export default function App() {
   };
 
   const onNodesDelete = useCallback((deleted) => {
+    setCanonicalIR(null);
     const ids = deleted.map((n) => n.id);
     setEdges((eds) => eds.filter((e) => !ids.includes(e.source) && !ids.includes(e.target)));
   }, [setEdges]);
 
   const onEdgesDelete = useCallback((deleted) => {
+    setCanonicalIR(null);
     setEdges((eds) => eds.filter((e) => !deleted.find((d) => d.id === e.id)));
     setNodes((nds) => nds.map((node) => ({ ...node, style: { ...node.style, border: "2px solid #222", boxShadow: "none" } })));
   }, [setEdges, setNodes]);
 
   const onConnect = useCallback((params) => {
+    setCanonicalIR(null);
     const sourceNode = nodes.find((n) => n.id === params.source);
     const targetNode = nodes.find((n) => n.id === params.target);
     const isFsmEdge  = sourceNode?.type === "fsm_state" && targetNode?.type === "fsm_state";
@@ -491,6 +508,7 @@ export default function App() {
     const onEdit = (e) => setEdges((eds) => eds.map((ed) => ({ ...ed, data: { ...ed.data, isEditing: ed.id === e.detail } })));
     const onDone = (e) => {
       const { id, val } = e.detail;
+      setCanonicalIR(null);
       setEdges((eds) => eds.map((ed) => ed.id === id ? { ...ed, data: { ...ed.data, condition: val, isEditing: false } } : ed));
     };
     window.addEventListener("fsm-edge-edit", onEdit);
@@ -647,12 +665,6 @@ export default function App() {
 
   const runDRC = () => {
     const errorNodes = new Set(); const warnNodes = new Set(); const logs = [];
-
-    // Widths come from the shared port contract (backend/port_contract.py,
-    // served at /handle_contract) rather than tables maintained here. The two
-    // used to disagree — bitwise comb ops were checked as 1-bit while the
-    // emitter built them operand-wide, so an 8-bit ALU lit up with mismatches
-    // that were artefacts of the checker, not the design.
     const resolveOutWidth = (node, srcPort) => {
       if (!node) return 1;
       const w = pcResolveWidth(node.type, srcPort, "outputs", node.data);
@@ -681,8 +693,6 @@ export default function App() {
         }
         const expected = expectedPinWidth(targetNode, pinId);
         if (expected === undefined) {
-          // The contract declares no such input handle — a wiring bug, not a
-          // width bug, and worth naming explicitly.
           errorNodes.add(targetNode.id);
           const valid = pcValidHandles(targetNode.type, "inputs", targetNode.data);
           logs.push(`❌ Unknown pin: ${targetNode.data.name}.${pinId} is not an input of ${targetNode.type}` +
@@ -767,9 +777,6 @@ export default function App() {
 
   const generateVerilog = async () => {
     try {
-      // Use canonicalIR from AI path if available — it has signal_list, output_logic,
-      // gated_by etc. that compileIR() (canvas recompile) cannot reconstruct.
-      // Fall back to compileIR() for manual-only canvas builds.
       let ir = canonicalIR ?? compileIR();
       // Patch custom blocks into IR — canonicalIR never contains them
       const _cbNodes = nodes.filter(n => n.type === "custom_block");
@@ -791,8 +798,8 @@ export default function App() {
       }
       const res = await fetch(`${API_BASE}/generate_verilog`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ir }) });
       const data = await res.json();
-      if (data.files) { setVerilogFiles(data.files); setActiveRtlFile("top.v"); setRtlReady(true); setTbReady(false); showToast("RTL generated", "success"); triggerFeedback("rtl_generated"); }
-      else if (data.verilog) { setVerilogFiles({ "top.v": data.verilog }); setActiveRtlFile("top.v"); setRtlReady(true); }
+      if (data.files) { setVerilogFiles(data.files); setActiveRtlFile("top.v"); setRtlReady(true); setTbReady(false); setSimulationResult(null); setShowWaveform(false); showToast("RTL generated", "success"); triggerFeedback("rtl_generated"); }
+      else if (data.verilog) { setVerilogFiles({ "top.v": data.verilog }); setActiveRtlFile("top.v"); setRtlReady(true); setSimulationResult(null); setShowWaveform(false); }
     } catch (err) { showToast("Error generating Verilog", "error"); }
   };
 
@@ -810,14 +817,20 @@ export default function App() {
 
   const runSimulation = async () => {
     if (!verilogFiles["top.v"] || !testbenchCode) { showToast("Generate RTL and Testbench first", "error"); return; }
-    // Block simulation if DRC found combinational loops — iverilog will hang
-    const hasLoops = drcLogs.some((l) => l.msg && l.msg.includes("Infinite Loop"));
+    const hasLoops = detectLoops(nodes, edges).length > 0;
     if (hasLoops) { showToast("Fix combinational loops (DRC tab) before simulating", "error"); setShowBottomPanel(true); setActiveTab("drc"); return; }
     setSimulating(true);
     try {
       const response = await fetch(`${API_BASE}/simulate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ verilog_files: verilogFiles, testbench: testbenchCode }) });
       const result = await response.json();
-      if (result.status === "success") { setSimulationResult(result); setShowWaveform(true); showToast("Simulation complete", "success"); triggerFeedback("simulation_done"); }
+      if (result.status === "success") {
+        const runKey = ++simRunSeqRef.current;
+        setSimulationResult({ ...result, _runKey: runKey });
+        setShowWaveform(true);
+        setWaveformHeight((h) => (h >= 200 ? h : 420));
+        showToast("Simulation complete", "success");
+        triggerFeedback("simulation_done");
+      }
       else { showToast("Simulation failed — check console", "error"); setShowBottomPanel(true); }
     } catch (error) { showToast("Simulation error: " + error.message, "error"); }
     finally { setSimulating(false); }
@@ -992,13 +1005,13 @@ export default function App() {
         <span style={{ fontSize: "12px", fontWeight: "700", color: T.textMuted, textTransform: "uppercase", letterSpacing: "1.5px", fontFamily: T.fontMono, whiteSpace: "nowrap", flexShrink: 0 }}>param</span>
         {params.map((p, i) => (
           <div key={i} className="param-chip">
-            <input value={p.name} onChange={(e) => { const n = [...params]; n[i].name = e.target.value; setParams(n); }} style={{ width: `${Math.max(40, p.name.length * 7.5)}px` }} />
+            <input value={p.name} onChange={(e) => { setCanonicalIR(null); const n = [...params]; n[i].name = e.target.value; setParams(n); }} style={{ width: `${Math.max(40, p.name.length * 7.5)}px` }} />
             <span className="param-eq">=</span>
-            <input className="param-val" value={p.value} onChange={(e) => { const n = [...params]; n[i].value = e.target.value; setParams(n); }} />
-            <button className="param-del" onClick={() => { if (params.length > 1) setParams(params.filter((_, idx) => idx !== i)); }}>×</button>
+            <input className="param-val" value={p.value} onChange={(e) => { setCanonicalIR(null); const n = [...params]; n[i].value = e.target.value; setParams(n); }} />
+            <button className="param-del" onClick={() => { if (params.length > 1) { setCanonicalIR(null); setParams(params.filter((_, idx) => idx !== i)); } }}>×</button>
           </div>
         ))}
-        <button onClick={() => setParams([...params, { name: "PARAM", value: "0" }])}
+        <button onClick={() => { setCanonicalIR(null); setParams([...params, { name: "PARAM", value: "0" }]); }}
           style={{ height: "24px", padding: "0 9px", background: "transparent", border: `1px dashed ${T.border2}`, borderRadius: T.r6, color: T.textMuted, fontSize: "17px", cursor: "pointer", fontFamily: T.fontUI, whiteSpace: "nowrap" }}
           onMouseEnter={(e) => { e.currentTarget.style.color = T.textSecondary; e.currentTarget.style.borderColor = `${T.blue}44`; }}
           onMouseLeave={(e) => { e.currentTarget.style.color = T.textMuted; e.currentTarget.style.borderColor = T.border2; }}>
@@ -1064,7 +1077,13 @@ export default function App() {
 
       {/* Waveform viewer */}
       {showWaveform && simulationResult && (
-        <WaveformViewer data={simulationResult} waveformHeight={waveformHeight} setWaveformHeight={setWaveformHeight} />
+        <WaveformViewer
+          key={simulationResult._runKey ?? simulationResult.run_id ?? simulationResult.timestamp ?? "waveform"}
+          data={simulationResult}
+          waveformHeight={waveformHeight}
+          setWaveformHeight={setWaveformHeight}
+          onClose={() => setShowWaveform(false)}
+        />
       )}
 
       {/* AI Sidebar */}
