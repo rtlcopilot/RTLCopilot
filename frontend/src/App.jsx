@@ -469,7 +469,7 @@ export default function App() {
     setNodes((nds) => [...nds, hydrateNode({
       id, type: selected.type,
       position: { x: (nodes.length % MAX_COLS) * GRID_X + 50, y: Math.floor(nodes.length / MAX_COLS) * GRID_Y + 50 },
-      data: { name: id, label: selected.label, op: selected.op, width: "8", value: 0, onChangeValue: handleValueChange, iterations: cordicOps.includes(selected.op) ? "16" : undefined, isMacro: !!selected.abstraction },
+      data: { name: id, label: selected.label, op: selected.op, width: selected.type === "macro_cordic" ? "16" : "8", value: 0, onChangeValue: handleValueChange, iterations: cordicOps.includes(selected.op) ? "16" : undefined, isMacro: !!selected.abstraction },
     })]);
   };
 
@@ -733,7 +733,7 @@ export default function App() {
 
   const compileIR = () => {
     let hwN = []; let hwE = [];
-    const macroTypes = ["macro_counter","macro_sync","macro_shiftreg","macro_rom","encoder","decoder","macro_fifo","macro_penc","macro_edgedet","macro_dpram","macro_cfgcounter","macro_mac"];
+    const macroTypes = ["macro_counter","macro_sync","macro_shiftreg","macro_rom","encoder","decoder","macro_fifo","macro_penc","macro_edgedet","macro_dpram","macro_cfgcounter","macro_mac","macro_cordic"];
     nodes.forEach((n) => {
       const w = n.data.width; const nm = n.data.name;
       if (n.type === "custom_block") {

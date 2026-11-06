@@ -63,7 +63,7 @@ def _needs_seq(ir):
         "macro_counter", "macro_shiftreg", "macro_sync",
         "macro_fifo", "macro_penc",
         "macro_edgedet", "macro_dpram", "macro_cfgcounter",
-        "macro_mac",
+        "macro_mac", "macro_cordic",
     }
 
 
@@ -109,6 +109,61 @@ def _detect_reset_active(ir):
     return "high"
 
 
+# ---------------------------------------------------------------------------
+# CORDIC decimal support
+# The CORDIC block works on integers (x, y = value x 256, angle = degrees x 100).
+# For top-level ports wired straight to a CORDIC block, the user can type normal
+# decimal numbers in the stimulus table. We convert them here, and print the
+# CORDIC outputs back as decimals.
+# ---------------------------------------------------------------------------
+CORDIC_XY_SCALE    = 256
+CORDIC_ANGLE_SCALE = 100
+CORDIC_TOLERANCE   = 0.02     # allowed difference (decimal units) for expected values
+
+
+def _cordic_port_scales(ir):
+    """Return {port_name: {"scale": int, "dir": "in"/"out", "kind": "xy"/"angle"}}."""
+    result  = {}
+    id_to_port = {p.get("id"): p for p in ir.get("ports", [])}
+    node_type  = {n.get("id"): n.get("type") for n in ir.get("nodes", [])}
+
+    for e in ir.get("edges", []):
+        src, dst = e.get("src"), e.get("dst")
+        sp,  dp  = e.get("src_port"), e.get("dst_port")
+
+        # input port  ->  cordic x / y / angle
+        if src in id_to_port and node_type.get(dst) == "macro_cordic":
+            name = id_to_port[src]["name"]
+            if dp in ("x", "y"):
+                result[name] = {"scale": CORDIC_XY_SCALE, "dir": "in", "kind": "xy"}
+            elif dp == "angle":
+                result[name] = {"scale": CORDIC_ANGLE_SCALE, "dir": "in", "kind": "angle"}
+
+        # cordic x_out / y_out  ->  output port
+        if dst in id_to_port and node_type.get(src) == "macro_cordic":
+            if sp in ("x_out", "y_out"):
+                result[id_to_port[dst]["name"]] = {"scale": CORDIC_XY_SCALE, "dir": "out", "kind": "xy"}
+
+    return result
+
+
+def _is_decimal(text):
+    """True for plain numbers like 5, -4, 3.5  (False for 16'h0100, x, etc.)."""
+    try:
+        float(str(text).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _to_fixed(text, scale):
+    """'3.5' -> 896.  If the text is not a plain decimal (e.g. 16'h0100) return it unchanged."""
+    try:
+        return str(int(round(float(str(text).strip()) * scale)))
+    except ValueError:
+        return str(text)
+
+
 def _build_corner_steps(input_ports, start_idx, params):
     """
     Corner-case stimulus: 0, all-ones, LSB-only, MSB-only per port.
@@ -144,7 +199,7 @@ def _build_corner_steps(input_ports, start_idx, params):
     return steps
 
 
-def _build_random_steps(input_ports, count, seed, start_idx, params):
+def _build_random_steps(input_ports, count, seed, start_idx, params, cordic_scales=None):
     """
     Random stimulus across all input ports simultaneously.
     Isolated RNG so global state is unaffected.
@@ -153,10 +208,15 @@ def _build_random_steps(input_ports, count, seed, start_idx, params):
     data_ports = [p for p in input_ports if p["name"] not in ("clk", "rst")]
     steps      = []
     for i in range(count):
-        values = {
-            p["name"]: str(rng.randint(0, (1 << _port_width_resolved(p, params)) - 1))
-            for p in data_ports
-        }
+        values = {}
+        for p in data_ports:
+            cs = (cordic_scales or {}).get(p["name"])
+            if cs and cs["kind"] == "xy":
+                values[p["name"]] = str(rng.randint(-20480, 20480))     # +-80.00
+            elif cs and cs["kind"] == "angle":
+                values[p["name"]] = str(rng.randint(-18000, 18000))     # +-180.00 deg
+            else:
+                values[p["name"]] = str(rng.randint(0, (1 << _port_width_resolved(p, params)) - 1))
         steps.append({
             "label":    f"random_{i}",
             "time":     (start_idx + i) * 100,
@@ -167,7 +227,7 @@ def _build_random_steps(input_ports, count, seed, start_idx, params):
     return steps
 
 
-def _emit_step(L, step, step_idx, needs_clk, current_sim_time, output_ports):
+def _emit_step(L, step, step_idx, needs_clk, current_sim_time, output_ports, cordic_scales=None):
     """Emit one stimulus step. Returns updated current_sim_time."""
     target_time = int(step.get("time", 0))
     values      = step.get("values", {})
@@ -190,26 +250,53 @@ def _emit_step(L, step, step_idx, needs_clk, current_sim_time, output_ports):
     has_inputs   = any(str(v).strip() for v in values.values())
     has_expected = any(str(v).strip() for v in expected.values())
 
+    cordic_scales = cordic_scales or {}
+
     for port_name, val in values.items():
         if str(val).strip():
+            cs = cordic_scales.get(port_name)
+            if cs and not is_auto:                 # user typed a decimal -> fixed point
+                val = _to_fixed(val, cs["scale"])
             L.append(f"    {port_name} = {val};")
 
     if not needs_clk:
         L.append("    #1;")
 
-    if needs_clk and has_inputs and has_expected:
+    if needs_clk and has_inputs and (has_expected or cordic_scales):
         L.append("    @(posedge clk); #1;  // settle: let sequential logic respond")
 
     inp_names   = [pn for pn in list(values.keys())[:4] if str(values.get(pn, "")).strip()]
     out_names   = [p["name"] for p in output_ports[:3]]
     all_display = inp_names + out_names
     if all_display:
-        fmt     = "  ".join([f"{n}=%0d" for n in all_display])
-        sig_str = ", ".join(all_display)
+        fmt_parts, arg_parts = [], []
+        for n in all_display:
+            cs = cordic_scales.get(n)
+            if cs:      # show CORDIC ports as decimals
+                fmt_parts.append(f"{n}=%0.4f")
+                arg_parts.append(f"($itor($signed({n})) / {float(cs['scale'])})")
+            else:
+                fmt_parts.append(f"{n}=%0d")
+                arg_parts.append(n)
+        fmt     = "  ".join(fmt_parts)
+        sig_str = ", ".join(arg_parts)
         L.append(f'    $display("{label}: {fmt}", {sig_str});')
 
     for out_name, exp_val in expected.items():
-        if str(exp_val).strip():
+        cs = cordic_scales.get(out_name)
+        if str(exp_val).strip() and cs and cs["dir"] == "out" and _is_decimal(exp_val):
+            # CORDIC output: compare as decimals, allow a small error
+            exp_int = _to_fixed(exp_val, cs["scale"])
+            tol     = max(2, int(CORDIC_TOLERANCE * cs["scale"] + 0.999))
+            diff    = f"($signed({out_name}) - ({exp_int}))"
+            L.append(f"    if ({diff} <= {tol} && {diff} >= -{tol}) begin")
+            L.append(f'      $display("  [PASS] {out_name} = %0.4f  (expected {exp_val}, tolerance {CORDIC_TOLERANCE})", $itor($signed({out_name})) / {float(cs["scale"])});')
+            L.append(f"      pass_count = pass_count + 1;")
+            L.append(f"    end else begin")
+            L.append(f'      $display("  [FAIL] {out_name}: expected {exp_val}, got %0.4f", $itor($signed({out_name})) / {float(cs["scale"])});')
+            L.append(f"      fail_count = fail_count + 1;")
+            L.append(f"    end")
+        elif str(exp_val).strip():
             L.append(f"    if ({out_name} === {exp_val}) begin")
             L.append(f'      $display("  [PASS] {out_name} == {exp_val}");')
             L.append(f"      pass_count = pass_count + 1;")
@@ -232,6 +319,7 @@ def emit_testbench(ir, stimulus):
     ir_params    = ir.get("parameters", {})
 
     has_seq      = _needs_seq(ir)
+    cordic_scales = _cordic_port_scales(ir)
     has_clk_port = "clk" in port_names
     has_rst_port = "rst" in port_names
     needs_clk    = has_seq or has_clk_port or has_rst_port
@@ -273,7 +361,7 @@ def emit_testbench(ir, stimulus):
     if use_random:
         random_steps = _build_random_steps(
             input_ports, num_random_steps, random_seed,
-            start_idx=next_idx, params=ir_params
+            start_idx=next_idx, params=ir_params, cordic_scales=cordic_scales
         )
 
     auto_step_count = len(corner_steps) + len(random_steps)
@@ -412,7 +500,7 @@ def emit_testbench(ir, stimulus):
         L.append("")
     for step_idx, step in enumerate(user_steps):
         current_sim_time = _emit_step(
-            L, step, step_idx, needs_clk, current_sim_time, output_ports
+            L, step, step_idx, needs_clk, current_sim_time, output_ports, cordic_scales
         )
 
     # Corner-case steps
@@ -421,7 +509,7 @@ def emit_testbench(ir, stimulus):
         L.append("")
         for step_idx, step in enumerate(corner_steps):
             current_sim_time = _emit_step(
-                L, step, step_idx, needs_clk, current_sim_time, output_ports
+                L, step, step_idx, needs_clk, current_sim_time, output_ports, cordic_scales
             )
 
     # Random steps
@@ -431,7 +519,7 @@ def emit_testbench(ir, stimulus):
         L.append("")
         for step_idx, step in enumerate(random_steps):
             current_sim_time = _emit_step(
-                L, step, step_idx, needs_clk, current_sim_time, output_ports
+                L, step, step_idx, needs_clk, current_sim_time, output_ports, cordic_scales
             )
 
     # Trailing hold to guarantee sim_duration_ns is reached

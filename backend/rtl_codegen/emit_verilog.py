@@ -19,6 +19,7 @@ from emit_edge_detector import emit_edge_detector,  edge_detector_instantiation
 from emit_dpram         import emit_dpram,          dpram_instantiation
 from emit_cfg_counter   import emit_cfg_counter,    cfg_counter_instantiation
 from emit_mac           import emit_mac,            mac_instantiation
+from emit_cordic        import emit_cordic,         cordic_instantiation
 try:
     from net_ir import build_net_ir, get_driver_wire as _net_get_driver
     _NET_IR_AVAILABLE = True
@@ -136,6 +137,13 @@ def _get_src(edges: list, raw_nodes: list, name_map: dict,
         }
         return port_map.get(src_port, f"{src_name}_{src_port or 'result'}")
 
+    if src_node["type"] == "macro_cordic":
+        port_map = {
+            "x_out": f"{src_name}_x_out",
+            "y_out": f"{src_name}_y_out",
+        }
+        return port_map.get(src_port, f"{src_name}_{src_port or 'x_out'}")
+
     if src_node["type"] == "macro_dpram":
         return f"{src_name}_{src_port or 'dout_a'}"
 
@@ -204,7 +212,7 @@ def emit_verilog(ir: dict) -> dict:
             "macro_counter", "macro_shiftreg", "macro_sync",
             "macro_fifo", "macro_penc",
             "macro_edgedet", "macro_dpram", "macro_cfgcounter",
-            "macro_mac"
+            "macro_mac", "macro_cordic"
         }
         nodes = [
             n for n in raw_nodes
@@ -428,6 +436,12 @@ def emit_verilog(ir: dict) -> dict:
                 top.append(f"    wire {nid}_overflow;")
                 continue
 
+            if ntyp == "macro_cordic":
+                cw = _safe_int(n.get("width", 16) or 16, 16)
+                top.append(f"    wire [{cw}-1:0] {nid}_x_out;")
+                top.append(f"    wire [{cw}-1:0] {nid}_y_out;")
+                continue
+
             if ntyp == "macro_shiftreg":
 
                 sr_mode = str(n.get("srMode", n.get("data", {}).get("srMode", "PISO"))).upper().strip()
@@ -487,7 +501,7 @@ def emit_verilog(ir: dict) -> dict:
                         "macro_counter", "macro_shiftreg", "macro_sync",
                         "macro_fifo", "macro_penc",
                         "macro_edgedet", "macro_dpram", "macro_cfgcounter",
-                        "macro_mac",
+                        "macro_mac", "macro_cordic",
                         "custom_block"):
                 continue   
 
@@ -782,6 +796,21 @@ def emit_verilog(ir: dict) -> dict:
                     clear_src    = src(oid, "clear"),
                     result_wire  = f"{nid}_result",
                     overflow_wire= f"{nid}_overflow",
+                ))
+                top.append("")
+
+            elif ntyp == "macro_cordic":
+                data_w = _safe_int(n.get("width", 16) or 16, 16)
+                mod_name, mod_src = emit_cordic(nid, data_w)
+                sub_files[f"{mod_name}.v"] = mod_src
+                top.append(f"    // CORDIC: {nid}")
+                top.append(cordic_instantiation(
+                    nid, data_w,
+                    x_src      = src(oid, "x"),
+                    y_src      = src(oid, "y"),
+                    angle_src  = src(oid, "angle"),
+                    x_out_wire = f"{nid}_x_out",
+                    y_out_wire = f"{nid}_y_out",
                 ))
                 top.append("")
 

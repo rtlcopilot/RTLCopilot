@@ -105,6 +105,10 @@ def _node_output_wire(node: dict, handle: str, name_map: dict) -> str:
         m = {"result": f"{nname}_result", "overflow": f"{nname}_overflow"}
         return m.get(handle, f"{nname}_{handle or 'result'}")
 
+    if ntype == "macro_cordic":
+        m = {"x_out": f"{nname}_x_out", "y_out": f"{nname}_y_out"}
+        return m.get(handle, f"{nname}_{handle or 'x_out'}")
+
     if ntype == "macro_dpram":
         m = {"dout_a": f"{nname}_dout_a", "dout_b": f"{nname}_dout_b"}
         return m.get(handle, f"{nname}_{handle or 'dout_a'}")

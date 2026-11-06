@@ -62,6 +62,9 @@ GENERIC_VOCABULARY: list[str] = [
     "mac",                  
     "mac_unit",             
     "multiply_accumulate",  
+
+    "cordic_rotator",
+    "vector_rotation",
 ]
 
 
@@ -562,6 +565,30 @@ _GENERIC_TO_PRIMITIVE: dict[str, dict] = {
         "width_rule": "data",
         "notes": "Alias for mac — see mac entry",
     },
+
+    "cordic_rotator": {
+        "pattern": "macro_cordic",
+        "handles": {
+            "inputs":  ["x", "y", "angle"],
+            "outputs": ["x_out", "y_out"],
+        },
+        "width_rule": "data",
+        "notes": (
+            "CORDIC vector rotation: rotates the point (x, y) by angle. "
+            "clk and rst are implicit — NEVER wire from block outputs. "
+            "x, y, x_out, y_out are DATA_WIDTH bits (value x 256); angle is 16 bits (degrees x 100). "
+            "Gain is already removed. Result valid 1 cycle after the inputs change."
+        ),
+    },
+    "vector_rotation": {
+        "pattern": "macro_cordic",
+        "handles": {
+            "inputs":  ["x", "y", "angle"],
+            "outputs": ["x_out", "y_out"],
+        },
+        "width_rule": "data",
+        "notes": "Alias for cordic_rotator — see cordic_rotator entry",
+    },
 }
 
 
@@ -728,6 +755,7 @@ def get_stage0_vocabulary_prompt() -> str:
         "Arithmetic": [
             "multiplier", "divider", "accumulator_adder",
             "mac", "mac_unit", "multiply_accumulate",
+            "cordic_rotator", "vector_rotation",
         ],
     }
 
