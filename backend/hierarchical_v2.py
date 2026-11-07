@@ -338,6 +338,8 @@ def _v2_make_node(sc_id: str, sc: dict, x_off: float = 0, y_off: float = 0) -> d
         base["type"] = "macro_cfgcounter"
     elif pattern == "macro_fifo":
         base["type"] = "macro_fifo"
+    elif pattern == "macro_cordic":
+        base["type"] = "macro_cordic"
     elif pattern == "macro_shiftreg":
         base["type"] = "macro_shiftreg"
         base["data"]["srMode"]   = data.get("srMode",   "PISO")

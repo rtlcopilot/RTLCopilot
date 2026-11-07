@@ -5,6 +5,7 @@ import { T, nodeBox, mathBox, stateCircle, deleteBtnStyle } from "../../constant
 import EditableLabel from "../shared/EditableLabel";
 import NodeWrapper from "../shared/NodeWrapper";
 import { formatValue } from "../../utils";
+import { cordicRotate } from "../../cordicModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InputNode
@@ -905,5 +906,95 @@ export const MacNode = ({ id, data }) => {
     </NodeWrapper>
   );
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CordicNode  (vector rotation, gain removed)
+// ─────────────────────────────────────────────────────────────────────────────
+export const CordicNode = ({ id, data }) => {
+  const dw = data.width || "16";
+
+  // "Try it" calculator: type decimals, get decimals (same math as the Verilog)
+  const [tx, setTx] = React.useState("10");
+  const [ty, setTy] = React.useState("0");
+  const [ta, setTa] = React.useState("30");
+
+  const nx = parseFloat(tx), ny = parseFloat(ty), na = parseFloat(ta);
+  const valid = [nx, ny, na].every((v) => Number.isFinite(v));
+  const res   = valid ? cordicRotate(nx, ny, na, parseInt(dw) || 16) : null;
+
+  const smallInput = { width: "46px", textAlign: "center", background: T.bg3, border: `1px solid ${T.border2}`, color: T.blue, borderRadius: T.r4, fontSize: "10px" };
+
+  return (
+    <NodeWrapper data={data} id={id} customStyle={{ ...nodeBox, minWidth: "190px" }}>
+      {/* Header */}
+      <div style={{ color: "#a855f7", fontWeight: "bold", fontSize: "12px", marginBottom: "2px" }}>
+        <EditableLabel value={data.name} onChange={data.rename} />
+      </div>
+      <div style={{ fontSize: "9px", color: T.textSecondary, letterSpacing: "1px", marginBottom: "8px" }}>CORDIC ROTATE  ⟲</div>
+
+      {/* Params */}
+      <div style={{ background: T.bg2, border: `1px solid ${T.border2}`, borderRadius: T.r6, padding: "6px 8px", marginBottom: "8px", fontSize: "10px", color: T.textSecondary }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span>Data Width</span>
+          <input type="text" className="nodrag" value={dw} onChange={(e) => data.setWidth?.(e.target.value)}
+            style={{ width: "40px", textAlign: "center", background: T.bg3, border: `1px solid ${T.border2}`, color: T.blue, borderRadius: T.r4, fontSize: "10px" }} />
+        </div>
+        <div style={{ fontSize: "8px", color: T.textMuted, marginTop: "4px", fontStyle: "italic" }}>
+          x, y = value × 256 · angle = deg × 100
+        </div>
+      </div>
+
+      {/* Pins */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {[
+            { id: "x",     label: "X",     color: T.blue  },
+            { id: "y",     label: "Y",     color: T.blue  },
+            { id: "angle", label: "ANGLE", color: T.amber },
+          ].map((p) => (
+            <div key={p.id} style={{ position: "relative", paddingLeft: "14px", display: "flex", alignItems: "center" }}>
+              <Handle type="target" position={Position.Left} id={p.id} style={{ background: p.color, width: "7px", height: "7px" }} />
+              <span style={{ fontSize: "9px", color: T.textSecondary, fontFamily: T.fontMono }}>{p.label}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+          {[
+            { id: "x_out", label: "X_OUT", color: T.sigOutput },
+            { id: "y_out", label: "Y_OUT", color: T.sigOutput },
+          ].map((p) => (
+            <div key={p.id} style={{ position: "relative", paddingRight: "14px", display: "flex", alignItems: "center", justifyContent: "flex-end" }}>
+              <span style={{ fontSize: "9px", color: T.textSecondary, fontFamily: T.fontMono }}>{p.label}</span>
+              <Handle type="source" position={Position.Right} id={p.id} style={{ background: p.color, width: "7px", height: "7px" }} />
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Decimal calculator */}
+      <div style={{ background: T.bg2, border: `1px solid ${T.border2}`, borderRadius: T.r6, padding: "6px 8px", marginTop: "8px", fontSize: "10px", color: T.textSecondary }}>
+        <div style={{ fontSize: "8px", color: T.textMuted, letterSpacing: "1px", marginBottom: "4px" }}>TRY IT (DECIMAL)</div>
+        <div style={{ display: "flex", gap: "4px", justifyContent: "space-between", marginBottom: "4px" }}>
+          <span>x <input type="text" className="nodrag" value={tx} onChange={(e) => setTx(e.target.value)} style={smallInput} /></span>
+          <span>y <input type="text" className="nodrag" value={ty} onChange={(e) => setTy(e.target.value)} style={smallInput} /></span>
+        </div>
+        <div style={{ marginBottom: "4px" }}>
+          angle <input type="text" className="nodrag" value={ta} onChange={(e) => setTa(e.target.value)} style={{ ...smallInput, color: T.amber }} /> °
+        </div>
+        <div style={{ fontFamily: T.fontMono, fontSize: "10px", color: T.green }}>
+          {res ? `x' = ${res.x.toFixed(4)}   y' = ${res.y.toFixed(4)}` : "enter numbers"}
+        </div>
+        {res && res.warning && (
+          <div style={{ fontSize: "8px", color: T.amber, marginTop: "2px" }}>⚠ {res.warning}</div>
+        )}
+      </div>
+
+      <div style={{ marginTop: "8px", fontSize: "8px", color: T.textMuted, fontStyle: "italic", textAlign: "center" }}>
+        no gain · clk · rst implicit
+      </div>
+    </NodeWrapper>
+  );
+};
+
 
 export { CustomBlockNode };

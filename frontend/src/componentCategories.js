@@ -56,6 +56,7 @@ export const COMPONENT_CATEGORIES = [
       { label: "Decoder",          type: "decoder",     op: "dec" },
       { label: "Priority Encoder", type: "macro_penc",  abstraction: "L1" },
       { label: "MAC",              type: "macro_mac",   abstraction: "L1" },
+      { label: "CORDIC Rotator",   type: "macro_cordic", abstraction: "L1" },
     ],
   },
   {

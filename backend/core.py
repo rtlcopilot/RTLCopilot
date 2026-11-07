@@ -105,6 +105,7 @@ _VALID_TYPES = {
     "macro_fifo", "macro_dpram",
     "macro_edgedet",
     "macro_mac",
+    "macro_cordic",
     "fsm_state",
 }
 
@@ -116,6 +117,7 @@ _DEFAULT_SRC = {
     "macro_dpram":      "dout_a",
     "macro_cfgcounter": "count",
     "macro_mac":        "result",
+    "macro_cordic":     "x_out",
     "fsm_state":        "out",
 }
 def _src_handle(ntype):
@@ -135,6 +137,8 @@ def _tgt_handle(ttype, tdata, count):
         return {0:"enable",1:"load",2:"load_value"}.get(count,"enable")
     if ttype == "macro_mac":
         return {0:"a", 1:"b", 2:"en", 3:"clear"}.get(count, "a")
+    if ttype == "macro_cordic":
+        return {0:"x", 1:"y", 2:"angle"}.get(count, "x")
     if ttype == "mux":
         mux_n = int(tdata.get("muxSize","2") or "2")
         return f"in{count}" if count < mux_n else f"sel{count-mux_n}"

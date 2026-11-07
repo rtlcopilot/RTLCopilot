@@ -145,6 +145,13 @@ PATTERN_PORTS: dict[str, dict[str, dict]] = {
         "inputs":  {"a": DATA, "b": DATA, "en": ONE, "clear": ONE},
         "outputs": {"result": ACC, "overflow": ONE},
     },
+    "macro_cordic": {
+        # CORDIC vector rotation: (x, y) rotated by angle -> (x_out, y_out), no gain.
+        # x, y, x_out, y_out are DATA wide (value x 256); angle is 16 bit (degrees x 100).
+        # clk and rst are implicit.
+        "inputs":  {"x": DATA, "y": DATA, "angle": "16"},
+        "outputs": {"x_out": DATA, "y_out": DATA},
+    },
     "macro_rom": {
         "inputs":  {"addr": ADDR},
         "outputs": {"dout": DATA},
@@ -388,6 +395,7 @@ _REQUIRED_INPUTS: dict[str, list[str]] = {
     "macro_dpram":       ["addr_a", "addr_b"],
     "macro_rom":         ["addr"],
     "macro_mac":         ["a", "b", "en"],
+    "macro_cordic":      ["x", "y", "angle"],
     "encoder":           ["data_in"],
     "decoder":           ["data_in"],
     "output":            ["in"],

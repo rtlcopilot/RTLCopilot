@@ -53,6 +53,8 @@ _CIRCUIT_KEYWORDS: dict[str, list[str]] = {
     "i2c_sensor":       ["i2c sensor", "sensor interface"],
     "uart_gps":         ["gps parser", "nmea parser", "gps uart"],
 
+    "cordic_rotator":   ["cordic vector rotation", "cordic rotator", "cordic rotation",
+                         "vector rotation", "rotate vector", "rotate a vector", "rotate the vector"],
     "cordic":           ["cordic", "sine cosine", "trigonometric"],
     "iir_filter":       ["iir filter", "biquad", "infinite impulse"],
     "sigma_delta":      ["sigma delta", "sigma-delta modulator"],
@@ -1745,6 +1747,38 @@ _KNOWN_HIERARCHIES: dict[str, dict] = {
         "top_level_outputs": [
             {"name": "result",   "width": "32", "from": "mac0", "src_handle": "result"},
             {"name": "overflow", "width": "1",  "from": "mac0", "src_handle": "overflow"},
+        ],
+        "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
+    },
+
+    "cordic_rotator": {
+        "description": "CORDIC Vector Rotation (x, y rotated by angle, no gain)",
+        "sub_circuits": [
+            {
+                "id": "cordic0", "name": "cordic0", "pattern": "macro_cordic",
+                "role": "Rotate vector (x, y) by angle, gain already removed",
+                "data": {"width": "16"},
+                "imports": [
+                    {"signal": "x",     "handle": "x",     "width": "16", "from": "external"},
+                    {"signal": "y",     "handle": "y",     "width": "16", "from": "external"},
+                    {"signal": "angle", "handle": "angle", "width": "16", "from": "external"},
+                ],
+                "exports": [
+                    {"signal": "x_out", "width": "16"},
+                    {"signal": "y_out", "width": "16"},
+                ],
+                "position": {"x": 400, "y": 200},
+            },
+        ],
+        "signal_list": [],
+        "top_level_inputs": [
+            {"name": "x",     "width": "16", "to": "cordic0", "dst_handle": "x"},
+            {"name": "y",     "width": "16", "to": "cordic0", "dst_handle": "y"},
+            {"name": "angle", "width": "16", "to": "cordic0", "dst_handle": "angle"},
+        ],
+        "top_level_outputs": [
+            {"name": "x_out", "width": "16", "from": "cordic0", "src_signal": "x_out"},
+            {"name": "y_out", "width": "16", "from": "cordic0", "src_signal": "y_out"},
         ],
         "reset": {"signal": "rst", "polarity": "active_high", "type": "synchronous"},
     },
