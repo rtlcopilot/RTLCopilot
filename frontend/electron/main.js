@@ -1,6 +1,13 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
+const {
+  LogTail,
+  ensurePortAvailable,
+  selectPython,
+  stopChild,
+  waitForHealth,
+} = require("./runtime");
 const IS_DEV = !app.isPackaged || process.argv.includes("--dev");
 const BACKEND_PORT = 8080;
 const FRONTEND_PORT = 5173;
@@ -11,7 +18,9 @@ const PD_WORK_DIR = path.join("D:\\RTLCopilot", "pd_work");
 
 let mainWindow = null;
 let backendProcess = null;
+let backendLogTail = new LogTail();
 let pdContainerRunning = false;
+let shutdownInProgress = false;
 
 function startBackend() {
   const projectRoot = path.resolve(__dirname, "..", "..");
@@ -22,59 +31,59 @@ function startBackend() {
   console.log("[backend] projectRoot:", projectRoot);
   console.log("[backend] backendDir:", backendDir);
 
-  const pythonCandidates = IS_DEV
-    ? ["python", "python3"]
-    : [
-        path.join(process.resourcesPath, "python", "python.exe"),
-        "python",
-        "python3",
-      ];
-
-  let pythonExe = null;
-  for (const candidate of pythonCandidates) {
-    try {
-      const result = spawnSync(candidate, ["--version"], {
-        timeout: 3000,
-        windowsHide: true,
-      });
-      if (result.status === 0 || (result.stdout && result.stdout.toString().includes("Python"))) {
-        pythonExe = candidate;
-        break;
+  const python = selectPython({
+    projectRoot,
+    fallback: () => {
+      const candidates = app.isPackaged
+        ? [path.join(process.resourcesPath, "python", "python.exe"), "python", "python3"]
+        : ["python3", "python"];
+      for (const command of candidates) {
+        const result = spawnSync(command, ["--version"], {
+          encoding: "utf8",
+          shell: false,
+          timeout: 3000,
+          windowsHide: true,
+        });
+        if (result.status === 0) return { command, args: [] };
       }
-    } catch {
-      // try next
-    }
-  }
+      throw new Error("Python not found. Run npm run doctor.");
+    },
+  });
 
-  if (!pythonExe) {
-    console.error("Python not found — backend will not start");
-    return;
-  }
-
-  console.log(`Starting backend with ${pythonExe} in ${backendDir}`);
+  console.log(`Starting backend with ${python.command} in ${backendDir}`);
+  backendLogTail = new LogTail(40);
 
   backendProcess = spawn(
-    pythonExe,
-    ["-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT), "--reload"],
+    python.command,
+    [...python.args, "-m", "uvicorn", "api:app", "--host", "127.0.0.1", "--port", String(BACKEND_PORT)],
     {
       cwd: backendDir,
+      shell: false,
+      windowsHide: true,
       env: { ...process.env, PYTHONPATH: backendDir, DESKTOP_MODE: "1", PYTHONUNBUFFERED: "1", PYTHONUTF8: "1" },
     }
   );
 
-  backendProcess.stdout.on("data", (d) => console.log("[backend]", d.toString().trim()));
-  backendProcess.stderr.on("data", (d) => console.log("[backend err]", d.toString().trim()));
+  const ownedProcess = backendProcess;
+  backendProcess.stdout.on("data", (d) => {
+    backendLogTail.append(d);
+    console.log("[backend]", d.toString().trim());
+  });
+  backendProcess.stderr.on("data", (d) => {
+    backendLogTail.append(d);
+    console.log("[backend err]", d.toString().trim());
+  });
   backendProcess.on("exit", (code) => {
     console.log(`[backend] exited with code ${code}`);
-    backendProcess = null;
+    if (backendProcess === ownedProcess) backendProcess = null;
   });
+  return ownedProcess;
 }
 
-function stopBackend() {
-  if (backendProcess) {
-    backendProcess.kill("SIGTERM");
-    backendProcess = null;
-  }
+async function stopBackend() {
+  const ownedProcess = backendProcess;
+  backendProcess = null;
+  await stopChild(ownedProcess);
 }
 
 function checkDockerStatus() {
@@ -206,27 +215,6 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
-function waitForBackend(retries = 20) {
-  return new Promise((resolve) => {
-    const http = require("http");
-    let attempts = 0;
-    const check = () => {
-      const req = http.get(`http://127.0.0.1:${BACKEND_PORT}/health`, (res) => {
-        if (res.statusCode === 200) { console.log("Backend ready"); resolve(); }
-        else retry();
-      });
-      req.on("error", retry);
-      req.setTimeout(500, () => { req.destroy(); retry(); });
-    };
-    const retry = () => {
-      attempts++;
-      if (attempts >= retries) { console.warn("Backend did not start in time"); resolve(); }
-      else setTimeout(check, 500);
-    };
-    check();
-  });
-}
-
 ipcMain.handle("get-app-version", () => app.getVersion());
 ipcMain.handle("get-backend-port", () => BACKEND_PORT);
 ipcMain.handle("is-desktop", () => true);
@@ -269,10 +257,44 @@ ipcMain.handle("pd-stop", () => {
 });
 
 app.whenReady().then(async () => {
-  startBackend();
-  await new Promise((r) => setTimeout(r, 1500));
-  await waitForBackend();
-  createWindow();
+  try {
+    await ensurePortAvailable({ port: BACKEND_PORT });
+    const child = startBackend();
+    await waitForHealth({
+      url: `http://127.0.0.1:${BACKEND_PORT}/health`,
+      child,
+      attempts: 40,
+      intervalMs: 250,
+    });
+    console.log("Backend ready");
+    createWindow();
+    if (process.env.RTLCOPILOT_SMOKE_TEST === "1") {
+      mainWindow.webContents.once("did-finish-load", () => setTimeout(async () => {
+        try {
+          const rendered = await mainWindow.webContents.executeJavaScript(`
+            Boolean(
+              document.querySelector("#root > *") &&
+              document.body.innerText.trim().length > 0
+            )
+          `);
+          if (!rendered) throw new Error("Renderer loaded without application content.");
+        } catch (error) {
+          process.exitCode = 1;
+          console.error(`[smoke] ${error.message}`);
+        } finally {
+          app.quit();
+        }
+      }, 500));
+    }
+  } catch (error) {
+    const logTail = backendLogTail.toString();
+    const message = `${error.message}\n\n${logTail ? `Backend log:\n${logTail}\n\n` : ""}Run npm run doctor for recovery steps.`;
+    console.error(message);
+    dialog.showErrorBox("RTLCopilot could not start", message);
+    await stopBackend();
+    app.quit();
+    return;
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -280,12 +302,19 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  stopBackend();
-  stopPDContainer();
   if (process.platform !== "darwin") app.quit();
 });
 
-app.on("before-quit", () => {
-  stopBackend();
-  stopPDContainer();
+app.on("before-quit", (event) => {
+  if (shutdownInProgress || (!backendProcess && !pdContainerRunning)) return;
+  event.preventDefault();
+  shutdownInProgress = true;
+  Promise.resolve()
+    .then(stopBackend)
+    .then(stopPDContainer)
+    .finally(() => app.exit(process.exitCode || 0));
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => app.quit());
+}

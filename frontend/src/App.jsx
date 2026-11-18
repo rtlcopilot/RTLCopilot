@@ -5,9 +5,8 @@ import PDPage from "./PDPage";
 
 import { T, GLOBAL_CSS } from "./constants";
 import { GRID_X, GRID_Y, MAX_COLS } from "./constants";
-import { API_BASE, supabase } from "./config";
+import { API_BASE, OFFLINE_MODE, supabase } from "./config";
 
-const OFFLINE_MODE = import.meta.env.VITE_OFFLINE_MODE === "true";
 import { nextFreeIndex, detectLoops, stripNodeForSave } from "./utils";
 import {
   loadPortContract,

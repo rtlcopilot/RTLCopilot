@@ -1,9 +1,13 @@
 import { createClient } from "@supabase/supabase-js";
 
-export const supabase = createClient(
-  import.meta.env.VITE_SUPABASE_URL,
-  import.meta.env.VITE_SUPABASE_ANON_KEY
-);
+export const OFFLINE_MODE = import.meta.env.VITE_OFFLINE_MODE === "true";
+
+export const supabase = OFFLINE_MODE
+  ? null
+  : createClient(
+      import.meta.env.VITE_SUPABASE_URL,
+      import.meta.env.VITE_SUPABASE_ANON_KEY,
+    );
 
 export const IS_DESKTOP =
   typeof window !== "undefined" && window.electronAPI !== undefined;

@@ -170,61 +170,78 @@ cd backend && python3 tests/test_port_contract.py
 
 ### Prerequisites
 
-- Python 3.10+
 - Node.js 18+
-- [iverilog](https://steveicarus.github.io/iverilog/) v12.0+ installed and on PATH — Windows: [download installer](https://bleyer.org/icarus/)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (for PD flow)
-- A free [Supabase](https://supabase.com) project (optional — not needed in offline mode)
-- An API key from OpenAI, Groq, or NVIDIA NIM (BYOK)
+- Python 3.10+
 
----
-
-### 1. Clone
+### Quick start for contributors
 
 ```bash
 git clone https://github.com/rtlcopilot/rtlcopilot.git
 cd rtlcopilot
+npm run setup
+npm run doctor
+npm run dev
 ```
 
----
+`setup` creates a repository-level `.venv`, installs the declared backend and
+frontend dependencies, and creates offline-mode environment files when they are
+missing. It is safe to rerun after success or an interrupted installation.
+Existing `backend/.env` and `frontend/.env` files are never edited or replaced.
 
-### 2. Database
+Use `npm run dev:web` when you want FastAPI and Vite in a browser without the
+Electron shell. Run the complete local verification suite with `npm test`.
 
-> **Skip this step if using offline mode.**
-
-Run `schema.sql` in your Supabase project's SQL editor to create all required tables.
-
-Enable Google OAuth in your Supabase project:
-**Authentication → Providers → Google → Enable**
-
----
-
-### 3. Backend
-
-**With Supabase (full mode):**
+If Python is installed under a nonstandard name or path, select it explicitly:
 
 ```bash
-cd backend
-cp .env.example .env   # Windows CMD: use "copy .env.example .env"
-# Fill in SUPABASE_URL and SUPABASE_SERVICE_KEY in .env
-pip install -r requirements.txt
-uvicorn api:app --port 8080
+RTLCOPILOT_PYTHON=/path/to/python npm run setup
 ```
 
-**Without Supabase (offline/contributor mode):**
+On Windows PowerShell:
+
+```powershell
+$env:RTLCOPILOT_PYTHON = "C:\Path To Python\python.exe"
+npm run setup
+```
+
+### Capability levels
+
+| Capability | Additional requirement | Base startup blocked when absent? |
+|---|---|---|
+| Canvas, offline projects, Verilog generation | Node.js 18+ and Python 3.10+ | Yes |
+| RTL simulation | [Icarus Verilog](https://steveicarus.github.io/iverilog/) v12+ on `PATH` | No |
+| AI generation and assistance | Provider key entered in the application | No |
+| Physical design | Docker Desktop/Engine with 8GB+ RAM | No |
+| Supabase-backed accounts/projects | Supabase project and matching env configuration | No |
+
+`npm run doctor` reports missing base requirements as **required action** and
+missing simulation, AI, or physical-design tools as **optional capability
+unavailable**. It never installs packages, stops port owners, or changes files.
+
+### Manual fallback and troubleshooting
+
+The root commands are the canonical workflow. If you need to diagnose one layer
+independently, the equivalent offline commands are:
 
 ```bash
+# Terminal 1, from the repository root
+python -m venv .venv
+# Activate .venv using your shell's normal command, then:
+python -m pip install -r backend/requirements-dev.txt
 cd backend
-cp .env.example .env   # Windows CMD: use "copy .env.example .env"
-# Set OFFLINE_MODE=true in .env — no Supabase keys needed
-pip install -r requirements.txt
-uvicorn api:app --port 8080
+uvicorn api:app --reload --host 127.0.0.1 --port 8080
 ```
 
-Offline mode bypasses Google OAuth and uses a local JSON file for project
-storage. It is implemented in `backend/core.py` (`_OFFLINE_MODE`,
-`_get_current_user`, `_local_db_load` / `_local_db_save`). You still need an LLM
-API key in the Settings panel for AI features to work.
+```bash
+# Terminal 2, from the repository root
+npm ci --prefix frontend
+npm run dev:vite --prefix frontend
+```
+
+For this manual path, create `backend/.env` with `OFFLINE_MODE=true` and
+`ALLOWED_ORIGINS=http://localhost:5173`, and create `frontend/.env` with
+`VITE_OFFLINE_MODE=true` and `VITE_API_URL=http://localhost:8080`. Do not copy
+the online examples unchanged when you intend to work offline.
 
 **LLM timeouts.** Model calls default to a 90-second timeout with SDK-level
 retries disabled, so a slow or cold-starting endpoint fails readably instead of
@@ -236,22 +253,7 @@ LLM_TIMEOUT_SECONDS=120   # default 90
 LLM_MAX_RETRIES=0         # leave at 0; the pipeline handles retries itself
 ```
 
----
-
-### 4. Frontend
-
-```bash
-cd frontend
-cp .env.example .env # Windows CMD: use "copy .env.example .env"
-# Full mode: fill in VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY, VITE_API_URL
-# Offline mode: set VITE_OFFLINE_MODE=true and VITE_API_URL=http://localhost:8080
-npm install
-npm run dev
-```
-
----
-
-### 5. PD tools (Docker)
+### Optional physical-design tools
 
 The physical design pipeline runs inside a Docker container with OpenROAD, Yosys, KLayout, and the Sky130 PDK pre-installed. The container is managed automatically by the Electron app — it starts when you open the Physical Design page and stops when you leave.
 
@@ -269,9 +271,7 @@ This pulls the pre-built `rtlcopilot/pd-tools:latest` image from Docker Hub (~9G
 
 The Electron app mounts your local `pdtools/` files directly into the container so changes take effect immediately on container restart. You do not need to rebuild the Docker image during development.
 
----
-
-### 6. Set your API key
+### Optional AI key
 
 Click **🔑 Settings** in the toolbar and enter your OpenAI / Groq / NVIDIA NIM key. All AI features use your own key — no credits system.
 

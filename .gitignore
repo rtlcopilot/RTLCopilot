@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 venv/
 .venv/
+.superpowers/
 *.egg-info/
 
 # Environment variables - NEVER commit these

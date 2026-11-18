@@ -1,0 +1,19 @@
+{
+  "name": "rtlcopilot-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cross-platform developer commands for RTLCopilot",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "doctor": "node scripts/doctor.js",
+    "dev": "node scripts/dev.js",
+    "dev:web": "node scripts/dev-web.js",
+    "build": "npm run build --prefix frontend",
+    "test:setup": "node --test scripts/test/dev-runner.test.js scripts/test/doctor.test.js scripts/test/platform.test.js scripts/test/runtime.test.js scripts/test/setup.test.js",
+    "test:backend": "node scripts/run-backend-tests.js",
+    "test": "npm run test:setup && node scripts/run-backend-tests.js && npm run build --prefix frontend"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
