@@ -37,7 +37,17 @@ test("web and desktop specs use direct commands without a shell", () => {
   }
 });
 
-test("Windows runners invoke npm and Electron JavaScript entrypoints through Node", () => {
+test("Vite is a direct child so shutdown cannot orphan an npm grandchild", () => {
+  const root = "/repo with spaces";
+  const nodeExecutable = "/opt/node/bin/node";
+  const spec = desktopSpecs(root, "linux", { nodeExecutable })[0];
+
+  assert.equal(spec.command, nodeExecutable);
+  assert.deepEqual(spec.args, [path.join(root, "frontend", "node_modules", "vite", "bin", "vite.js")]);
+  assert.equal(spec.options.cwd, path.join(root, "frontend"));
+});
+
+test("Windows runners invoke Vite and Electron JavaScript entrypoints through Node", () => {
   const root = "C:\\repo with spaces";
   const runtime = {
     nodeExecutable: "C:\\Program Files\\nodejs\\node.exe",
@@ -47,7 +57,7 @@ test("Windows runners invoke npm and Electron JavaScript entrypoints through Nod
   const desktop = desktopSpecs(root, "win32", runtime);
 
   assert.equal(web[1].command, runtime.nodeExecutable);
-  assert.equal(web[1].args[0], runtime.npmExecPath);
+  assert.equal(web[1].args[0], path.win32.join(root, "frontend", "node_modules", "vite", "bin", "vite.js"));
   assert.equal(desktop[1].command, runtime.nodeExecutable);
   assert.equal(desktop[1].args[0], path.join(root, "frontend", "node_modules", "electron", "cli.js"));
   assert.equal(desktop[1].options.shell, false);

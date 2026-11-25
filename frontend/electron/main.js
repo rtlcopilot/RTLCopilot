@@ -1,6 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
+const { createPDHandlers, PDService } = require("./pd-runtime");
 const {
   LogTail,
   ensurePortAvailable,
@@ -11,19 +12,19 @@ const {
 const IS_DEV = !app.isPackaged || process.argv.includes("--dev");
 const BACKEND_PORT = 8080;
 const FRONTEND_PORT = 5173;
-const PD_PORT = 7070;
-const PD_IMAGE = "rtlcopilot/pd-tools";
-const PD_CONTAINER_NAME = "rtlcopilot-pd";
-const PD_WORK_DIR = path.join("D:\\RTLCopilot", "pd_work");
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 
 let mainWindow = null;
 let backendProcess = null;
 let backendLogTail = new LogTail();
-let pdContainerRunning = false;
 let shutdownInProgress = false;
+const pdService = new PDService({
+  projectRoot: IS_DEV ? PROJECT_ROOT : process.resourcesPath,
+});
+const pdHandlers = createPDHandlers({ service: pdService });
 
 function startBackend() {
-  const projectRoot = path.resolve(__dirname, "..", "..");
+  const projectRoot = PROJECT_ROOT;
   const backendDir = IS_DEV
     ? path.join(projectRoot, "backend")
     : path.join(process.resourcesPath, "backend");
@@ -86,107 +87,6 @@ async function stopBackend() {
   await stopChild(ownedProcess);
 }
 
-function checkDockerStatus() {
-  const which = spawnSync(
-    process.platform === "win32" ? "where" : "which",
-    ["docker"],
-    { timeout: 3000, windowsHide: true, shell: true }
-  );
-  if (which.status !== 0) {
-    return { installed: false, running: false };
-  }
-
-
-  const version = spawnSync("docker", ["version", "--format", "{{.Server.Version}}"], {
-    timeout: 8000, windowsHide: true, shell: true,
-  });
-  return { installed: true, running: version.status === 0 };
-}
-
-function imageExistsLocally() {
-  const result = spawnSync("docker", ["image", "inspect", PD_IMAGE], {
-    timeout: 5000, windowsHide: true, shell: true,
-  });
-  return result.status === 0;
-}
-
-function pullImage(onData) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn("docker", ["pull", PD_IMAGE], { windowsHide: true, shell: true });
-    proc.stdout.on("data", (d) => onData(d.toString()));
-    proc.stderr.on("data", (d) => onData(d.toString()));
-    proc.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`docker pull exited with code ${code}`));
-    });
-  });
-}
-
-function startPDContainer() {
-  return new Promise((resolve, reject) => {
-    spawnSync("docker", ["rm", "-f", PD_CONTAINER_NAME], {
-      timeout: 5000, windowsHide: true, shell: true,
-    });
-
-    const fs = require("fs");
-    if (!fs.existsSync(PD_WORK_DIR)) fs.mkdirSync(PD_WORK_DIR, { recursive: true });
-
-    const proc = spawn("docker", [
-      "run", "--rm", "-d",
-      "--name", PD_CONTAINER_NAME,
-      "-p", `${PD_PORT}:7070`,
-      "-v", `${PD_WORK_DIR}:/work`,
-      "-v", `D:\\RTLCopilot\\pdtools\\api.py:/app/api.py`,
-      "-v", `D:\\RTLCopilot\\pdtools\\pd_verification.py:/app/pd_verification.py`,
-      "-v", `D:\\RTLCopilot\\pdtools\\verification_policy.json:/app/verification_policy.json`,
-      "-v", `D:\\RTLCopilot\\pdtools\\export_preview.py:/app/export_preview.py`,
-      PD_IMAGE,
-    ], { windowsHide: true, shell: true });
-
-    let out = "";
-    proc.stdout.on("data", (d) => { out += d.toString(); });
-    proc.stderr.on("data", (d) => { out += d.toString(); });
-    proc.on("exit", (code) => {
-      if (code === 0) {
-        pdContainerRunning = true;
-        resolve();
-      } else {
-        reject(new Error(`docker run failed: ${out}`));
-      }
-    });
-  });
-}
-
-function stopPDContainer() {
-  if (!pdContainerRunning) return;
-  spawnSync("docker", ["stop", PD_CONTAINER_NAME], {
-    timeout: 10000, windowsHide: true, shell: true,
-  });
-  pdContainerRunning = false;
-  console.log("[pd] container stopped");
-}
-
-function waitForPDContainer(retries = 30) {
-  return new Promise((resolve) => {
-    const http = require("http");
-    let attempts = 0;
-    const check = () => {
-      const req = http.get(`http://127.0.0.1:${PD_PORT}/health`, (res) => {
-        if (res.statusCode === 200) resolve();
-        else retry();
-      });
-      req.on("error", retry);
-      req.setTimeout(500, () => { req.destroy(); retry(); });
-    };
-    const retry = () => {
-      attempts++;
-      if (attempts >= retries) resolve(); // don't block forever
-      else setTimeout(check, 1000);
-    };
-    check();
-  });
-}
-
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -221,40 +121,9 @@ ipcMain.handle("is-desktop", () => true);
 ipcMain.handle("open-external", (_, url) => shell.openExternal(url));
 
 
-ipcMain.handle("pd-check-docker", () => {
-  return checkDockerStatus();
-});
-
-
-ipcMain.handle("pd-start", async (event) => {
-  try {
-    const { installed, running } = checkDockerStatus();
-    if (!installed) return { ok: false, error: "Docker not installed" };
-    if (!running)   return { ok: false, error: "Docker daemon not running" };
-
-
-    if (!imageExistsLocally()) {
-      event.sender.send("pd-pull-progress", "[INFO] Pulling rtlcopilot/pd-tools image (first time only, ~2GB)...\n");
-      await pullImage((line) => event.sender.send("pd-pull-progress", line));
-      event.sender.send("pd-pull-progress", "[INFO] Pull complete.\n");
-    }
-
-    event.sender.send("pd-pull-progress", "[INFO] Starting PD container...\n");
-    await startPDContainer();
-    await waitForPDContainer();
-    event.sender.send("pd-pull-progress", "[INFO] PD container ready on port 7070.\n");
-
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
-
-
-ipcMain.handle("pd-stop", () => {
-  stopPDContainer();
-  return { ok: true };
-});
+ipcMain.handle("pd-check-docker", pdHandlers.check);
+ipcMain.handle("pd-start", pdHandlers.start);
+ipcMain.handle("pd-stop", pdHandlers.stop);
 
 app.whenReady().then(async () => {
   try {
@@ -306,12 +175,16 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", (event) => {
-  if (shutdownInProgress || (!backendProcess && !pdContainerRunning)) return;
+  if (shutdownInProgress || (!backendProcess && !pdService.isActive())) return;
   event.preventDefault();
   shutdownInProgress = true;
   Promise.resolve()
     .then(stopBackend)
-    .then(stopPDContainer)
+    .then(() => pdService.stop())
+    .catch((error) => {
+      process.exitCode = 1;
+      console.error(`[shutdown] ${error.message}`);
+    })
     .finally(() => app.exit(process.exitCode || 0));
 });
 

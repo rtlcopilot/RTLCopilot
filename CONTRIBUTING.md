@@ -92,7 +92,7 @@ Takes an IR dict, emits Verilog. Deterministic — same IR always produces same 
 
 ---
 
-### PD pipeline — `pd/api.py`
+### PD pipeline — `pdtools/api.py`
 
 Runs **inside Docker** at port 7070. Separate from the main backend. Handles:
 
@@ -101,9 +101,11 @@ Runs **inside Docker** at port 7070. Separate from the main backend. Handles:
 - DRC check
 - GDS export
 
-Uses Sky130 PDK (pinned to `0fe599b2afb6708d281543108caf8310912f54af`). Run outputs go to `pd/work/{run_id}/`.
+Uses Sky130 PDK (pinned to `0fe599b2afb6708d281543108caf8310912f54af`). Run outputs go to `pdtools/work/{run_id}/`.
 
-If you want to contribute to the PD pipeline, you need Docker Desktop with 8GB+ RAM.
+If you want to contribute to the PD pipeline, you need Docker Desktop or
+Docker Engine with Compose and 8GB+ RAM. Follow the canonical
+[physical-design setup and lifecycle instructions](README.md#optional-physical-design-tools).
 
 ---
 

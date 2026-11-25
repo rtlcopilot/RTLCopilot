@@ -170,10 +170,11 @@ cd backend && python3 tests/test_port_contract.py
 
 ### Prerequisites
 
+- Git
 - Node.js 18+
-- Python 3.10+
+- Python 3.10+ with `pip` and `venv`
 
-### Quick start for contributors
+### Fresh clone: base application
 
 ```bash
 git clone https://github.com/rtlcopilot/rtlcopilot.git
@@ -187,6 +188,27 @@ npm run dev
 frontend dependencies, and creates offline-mode environment files when they are
 missing. It is safe to rerun after success or an interrupted installation.
 Existing `backend/.env` and `frontend/.env` files are never edited or replaced.
+You do not need to activate `.venv` manually.
+
+On a fresh clone, the generated configuration is:
+
+```dotenv
+# backend/.env
+OFFLINE_MODE=true
+ALLOWED_ORIGINS=http://localhost:5173
+```
+
+```dotenv
+# frontend/.env
+VITE_OFFLINE_MODE=true
+VITE_API_URL=http://localhost:8080
+```
+
+These defaults enable the local canvas, offline project persistence, and
+Verilog generation without Supabase or an API key. Environment setup is still
+required, but `npm run setup` performs it automatically. To use existing online
+configuration instead, create both environment files before running setup; the
+command will preserve them.
 
 Use `npm run dev:web` when you want FastAPI and Vite in a browser without the
 Electron shell. Run the complete local verification suite with `npm test`.
@@ -217,6 +239,17 @@ npm run setup
 `npm run doctor` reports missing base requirements as **required action** and
 missing simulation, AI, or physical-design tools as **optional capability
 unavailable**. It never installs packages, stops port owners, or changes files.
+
+### Local services and ports
+
+| Service | Address | Started by |
+|---|---|---|
+| Vite frontend | `http://localhost:5173` | `npm run dev` or `npm run dev:web` |
+| Main FastAPI backend | `http://localhost:8080` | Electron or `npm run dev:web` |
+| Physical-design API | `http://localhost:7070` | Docker Compose or Electron on Windows, macOS, and Linux |
+
+Run `npm run doctor` before starting the application. Ports 5173 and 8080 must
+be available; the Docker PD flow additionally requires port 7070.
 
 ### Manual fallback and troubleshooting
 
@@ -255,21 +288,98 @@ LLM_MAX_RETRIES=0         # leave at 0; the pipeline handles retries itself
 
 ### Optional physical-design tools
 
-The physical design pipeline runs inside a Docker container with OpenROAD, Yosys, KLayout, and the Sky130 PDK pre-installed. The container is managed automatically by the Electron app — it starts when you open the Physical Design page and stops when you leave.
+The physical-design pipeline runs separately from the main backend in a Docker
+container containing OpenROAD, Yosys, KLayout, and the Sky130 PDK. Docker is not
+needed for the base application. For PD, install Docker Desktop or Docker
+Engine with Compose, allocate at least 8 GB of RAM, and make sure the Docker
+daemon is running.
+
+#### Electron desktop flow
+
+Start the desktop application normally:
 
 ```bash
-cd pdtools
-docker compose up
+npm run dev
 ```
 
-This pulls the pre-built `rtlcopilot/pd-tools:latest` image from Docker Hub (~9GB) and starts the PD server on port 7070.
+When you open **PD**, Electron checks Docker, pulls the image when it is
+missing, starts an RTLCopilot-owned container, waits for strict health
+readiness, and stops that exact container when you leave PD or quit. The
+checkout and its `pdtools/work/` directory are resolved from the current
+repository path on Windows, macOS, and Linux.
+
+#### Browser flow with Docker Compose
+
+From the repository root, pull and start the PD service:
+
+```bash
+docker compose -f pdtools/docker-compose.yml pull
+docker compose -f pdtools/docker-compose.yml up -d
+```
+
+The first pull downloads the large `rtlcopilot/pd-tools:latest` image (up to
+approximately 9 GB). Confirm that the service is ready:
+
+```bash
+curl http://127.0.0.1:7070/health
+```
+
+PowerShell users can run:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:7070/health
+```
+
+A healthy service reports `"status": "ok"`. In a second terminal, start the
+browser application:
+
+```bash
+npm run dev:web
+```
+
+Open `http://localhost:5173`, then select **PD**. The PD API explicitly allows
+the two local Vite origins (`localhost:5173` and `127.0.0.1:5173`). No
+additional `.env` values are required for the standard local flow.
+
+Both Electron and Compose persist run artifacts under
+`pdtools/work/{run_id}/` on the host. The directory is gitignored. Both flows
+mount `api.py`, `pd_verification.py`, `verification_policy.json`, and
+`export_preview.py` from the checkout for contributor edits.
+
+To permit another explicit development origin, set a comma-separated
+`PD_ALLOWED_ORIGINS` value before recreating the Compose service. Wildcards are
+rejected:
+
+```bash
+PD_ALLOWED_ORIGINS=http://dev-host.example:5173 \
+  docker compose -f pdtools/docker-compose.yml up -d --force-recreate
+```
+
+Useful lifecycle commands, all run from the repository root:
+
+```bash
+# Follow PD service logs
+docker compose -f pdtools/docker-compose.yml logs -f
+
+# Show container state and port mapping
+docker compose -f pdtools/docker-compose.yml ps
+
+# Stop and remove the PD container and network; persisted work remains
+docker compose -f pdtools/docker-compose.yml down
+```
 
 > **Note:** Docker Desktop must have at least 8GB RAM allocated.
 > Settings → Resources → Memory → 8GB+
 
-**For contributors (live file editing without rebuilding the image):**
+If startup reports that port 7070 is already in use, do not stop an unknown
+process blindly. Check whether the PD service is already running with
+`docker compose -f pdtools/docker-compose.yml ps` or inspect the port owner,
+then stop that service or process before retrying.
 
-The Electron app mounts your local `pdtools/` files directly into the container so changes take effect immediately on container restart. You do not need to rebuild the Docker image during development.
+Electron and Compose intentionally use separate ownership models. Do not start
+Compose manually and then open the Electron PD page: Electron will report that
+port 7070 or the `rtlcopilot-pd` container name is already in use rather than
+stopping a service it does not own.
 
 ### Optional AI key
 

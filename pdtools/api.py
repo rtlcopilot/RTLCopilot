@@ -12,12 +12,16 @@ import subprocess
 import re
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from jinja2 import Environment, FileSystemLoader
 
-import pd_verification as pdv  # all check/metric/fix logic lives there — keep it out of this file
+try:
+    from . import pd_verification as pdv
+except ImportError:  # Docker runs this module as top-level `api:app`.
+    import pd_verification as pdv
 
 
 def _read_meta_clock(run_dir: Path) -> float:
@@ -28,9 +32,29 @@ def _read_meta_clock(run_dir: Path) -> float:
     except Exception:
         return 10.0
 
-app = FastAPI(title="RTL Copilot PD Tools", version="2.0.0")
+LOCAL_VITE_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
-WORK_BASE = "/work"
+
+def build_allowed_origins(configured: str = "") -> list[str]:
+    extras = [origin.strip() for origin in configured.split(",") if origin.strip()]
+    if "*" in extras:
+        raise ValueError("PD_ALLOWED_ORIGINS must not contain a wildcard origin")
+    return list(dict.fromkeys([*LOCAL_VITE_ORIGINS, *extras]))
+
+
+app = FastAPI(title="RTL Copilot PD Tools", version="2.0.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=build_allowed_origins(os.environ.get("PD_ALLOWED_ORIGINS", "")),
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+    max_age=600,
+)
+
+WORK_BASE = os.environ.get("PD_WORK_BASE", "/work")
 PDK_ROOT  = "/pdk/volare/sky130/versions/0fe599b2afb6708d281543108caf8310912f54af/sky130A"
 TEMPLATES  = "/app/templates"
 

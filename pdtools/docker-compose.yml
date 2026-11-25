@@ -1,13 +1,15 @@
-version: "3.9"
-
 services:
   pd-tools:
     image: rtlcopilot/pd-tools:latest
     build: .
     ports:
-      - "7070:7070"
+      - "127.0.0.1:7070:7070"
+    environment:
+      PD_ALLOWED_ORIGINS: ${PD_ALLOWED_ORIGINS:-}
     volumes:
       - ./work:/work
       - ./api.py:/app/api.py
       - ./pd_verification.py:/app/pd_verification.py
+      - ./verification_policy.json:/app/verification_policy.json
+      - ./export_preview.py:/app/export_preview.py
     restart: unless-stopped

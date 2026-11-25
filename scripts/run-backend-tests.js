@@ -5,7 +5,7 @@ const { spawnSync } = require("node:child_process");
 const { venvPython } = require("./lib/platform");
 
 const root = path.resolve(__dirname, "..");
-const result = spawnSync(venvPython(root), ["-m", "pytest", "backend/tests", "-q"], {
+const result = spawnSync(venvPython(root), ["-m", "pytest", "backend/tests", "pdtools/tests", "-q"], {
   cwd: root,
   env: { ...process.env },
   shell: false,

@@ -79,6 +79,27 @@ test("waitForHealth reports a bounded timeout", async () => {
   );
 });
 
+test("health and port failures identify the requested service", async () => {
+  await assert.rejects(
+    waitForHealth({
+      url: "http://127.0.0.1:7070/health",
+      attempts: 1,
+      serviceName: "PD service",
+      requestJson: async () => ({ statusCode: 200, body: { status: "starting" } }),
+    }),
+    /PD service did not become ready/,
+  );
+
+  const server = new EventEmitter();
+  server.unref = () => {};
+  server.listen = () => queueMicrotask(() => server.emit("error", Object.assign(new Error("busy"), { code: "EADDRINUSE" })));
+  server.close = () => {};
+  await assert.rejects(
+    ensurePortAvailable({ port: 7070, serviceName: "PD service", createServer: () => server }),
+    /PD service port 7070 is already in use/,
+  );
+});
+
 test("development Python prefers the repository virtual environment", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "rtl runtime "));
   const executable = path.join(root, ".venv", "bin", "python");

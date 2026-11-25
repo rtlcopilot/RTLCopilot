@@ -95,6 +95,8 @@ async function waitForHealth({
   attempts = 30,
   intervalMs = 500,
   requestJson = getJson,
+  serviceName = "Backend",
+  signal = null,
 } = {}) {
   let earlyExit = null;
   const onExit = (code, signal) => {
@@ -103,8 +105,9 @@ async function waitForHealth({
   if (child) child.once("exit", onExit);
   try {
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      if (signal && signal.aborted) throw Object.assign(new Error(`${serviceName} startup cancelled.`), { name: "AbortError" });
       if (earlyExit || (child && child.exitCode != null)) {
-        throw earlyExit || new Error(`Backend exited before readiness (code ${child.exitCode}).`);
+        throw earlyExit || new Error(`${serviceName} exited before readiness (code ${child.exitCode}).`);
       }
       let response = null;
       try {
@@ -118,7 +121,7 @@ async function waitForHealth({
       if (response && response.statusCode === 200 && response.body && response.body.status === "ok") return;
       if (attempt < attempts) await delay(intervalMs);
     }
-    throw new Error(`Backend did not become ready after ${attempts} attempts.`);
+    throw new Error(`${serviceName} did not become ready after ${attempts} attempts.`);
   } finally {
     if (child) child.removeListener("exit", onExit);
   }
@@ -128,13 +131,14 @@ function ensurePortAvailable({
   port,
   host = "127.0.0.1",
   createServer = () => net.createServer(),
+  serviceName = "Backend",
 } = {}) {
   return new Promise((resolve, reject) => {
     const server = createServer();
     server.unref();
     server.once("error", (error) => {
       const detail = error && error.code === "EADDRINUSE" ? "already in use" : (error.message || "unavailable");
-      reject(new Error(`Backend port ${port} is ${detail}. Run npm run doctor.`));
+      reject(new Error(`${serviceName} port ${port} is ${detail}. Run npm run doctor.`));
     });
     server.listen({ host, port, exclusive: true }, () => {
       server.close(resolve);

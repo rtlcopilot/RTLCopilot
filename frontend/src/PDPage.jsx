@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { createDesktopPDSession } from "./pdSession.mjs";
 
 const ChevronLeft  = ({ className }) => <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>;
 const Play         = ({ className }) => <svg className={className} viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>;
@@ -994,7 +995,7 @@ function RunHistory({ onRestore, onClose }) {
             <div className="text-center p-8 space-y-1">
               <p className="text-[#888896] text-sm">No previous runs found.</p>
               <p className="text-[#888896] text-xs">Make sure the PD tools container is running.</p>
-              <p className="text-[#888896] text-xs">Runs persist at D:\pdtools\work\ via Docker volume.</p>
+              <p className="text-[#888896] text-xs">Runs persist under this checkout's pdtools/work directory.</p>
             </div>
           )}
           {!loading && runs.map(run => (
@@ -2530,17 +2531,19 @@ export default function PDPage({ verilogFiles = {}, onBack }) {
 
   useEffect(() => {
     if (!isDesktop) { setDockerReady(true); return; }
-    (async () => {
-      const { installed, running } = await window.electronAPI.pdCheckDocker();
-      if (!installed) { setDockerPrompt("Docker Desktop is not installed. It is required to run the Physical Design tools."); return; }
-      if (!running)   { setDockerPrompt("Docker Desktop is not running. Please start it and try again."); return; }
-      window.electronAPI.onPdPullProgress(l => setContainerLog(p => [...p, l]));
-      const result = await window.electronAPI.pdStart();
-      window.electronAPI.offPdPullProgress();
-      if (!result.ok) { setContainerLog(p => [...p, "[ERROR] " + result.error]); return; }
+    const session = createDesktopPDSession(window.electronAPI, {
+      onProgress: (line) => setContainerLog(p => [...p, line]),
+    });
+    session.start().then((result) => {
+      if (result.cancelled) return;
+      if (!result.ok) {
+        setDockerPrompt(result.error);
+        setContainerLog(p => [...p, "[ERROR] " + result.error]);
+        return;
+      }
       setDockerReady(true);
-    })();
-    return () => { if (isDesktop) window.electronAPI.pdStop?.(); };
+    });
+    return () => { session.stop(); };
   }, []);
 
   useEffect(() => {

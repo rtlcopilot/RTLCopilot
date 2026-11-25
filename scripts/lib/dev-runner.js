@@ -40,13 +40,13 @@ function backendSpec(root, platform = process.platform, {
 
 function viteSpec(root, platform = process.platform, {
   nodeExecutable = process.execPath,
-  npmExecPath = process.env.npm_execpath || null,
 } = {}) {
+  const pathImpl = platform === "win32" ? path.win32 : path;
   return {
     name: "vite",
-    command: npmExecPath ? nodeExecutable : (platform === "win32" ? "npm.cmd" : "npm"),
-    args: [...(npmExecPath ? [npmExecPath] : []), "run", "dev:vite", "--prefix", path.join(root, "frontend")],
-    options: commonOptions(root),
+    command: nodeExecutable,
+    args: [pathImpl.join(root, "frontend", "node_modules", "vite", "bin", "vite.js")],
+    options: commonOptions(pathImpl.join(root, "frontend")),
   };
 }
 
